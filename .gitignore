@@ -1,0 +1,5 @@
+ref/
+build/
+server/config.ini
+server/data/feedbag/
+server/data/offline/

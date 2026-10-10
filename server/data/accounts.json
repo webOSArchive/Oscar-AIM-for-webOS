@@ -1,0 +1,4 @@
+{
+  "lunacytest": {"screenName": "LunacyTest", "chatKey": "webos-chat-test"},
+  "touchpadtest": {"screenName": "TouchPadTest", "chatKey": "webos-chat-test"}
+}

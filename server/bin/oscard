@@ -1,0 +1,25 @@
+#!/usr/bin/env php
+<?php
+/**
+ * webOS Chat's OSCAR server. Run: php bin/oscard [config.ini]
+ * See ../README.md for the configuration and deployment.
+ */
+require_once __DIR__ . '/../src/Server.php';
+
+$ini = $argv[1] ?? __DIR__ . '/../config.ini';
+$cfg = is_file($ini) ? parse_ini_file($ini, false, INI_SCANNER_TYPED) : [];
+$get = fn(string $k, $d) => getenv('OSCAR_' . strtoupper($k)) ?: ($cfg[$k] ?? $d);
+
+$dataDir = $get('data_dir', __DIR__ . '/../data');
+$accounts = match ($get('accounts', 'file')) {
+    'pdo' => new PdoAccounts($get('db_dsn', ''), $get('db_user', ''), $get('db_pass', '')),
+    default => new FileAccounts("$dataDir/accounts.json"),
+};
+
+(new Server(
+    array_map('trim', explode(',', $get('listen', '0.0.0.0:5190'))),
+    $get('advertise', 'oscar.webosarchive.org:5190'),
+    $accounts,
+    new UserData($dataDir),
+    (bool)$get('debug', false),
+))->run();
