@@ -545,12 +545,28 @@ final class Server
         $this->snac($c, 0x13, 0x0E, $acks, $reqid);
     }
 
-    /** Rate classes: one generous class. Version 3 adds a time delta and a dropping flag. */
+    /** Every SNAC a client sends, so each has a rate class (libpurple 2.5.1 warns of any without). */
+    private const RATED = [
+        0x01 => [0x02, 0x04, 0x06, 0x08, 0x0E, 0x11, 0x14, 0x17, 0x1E],
+        0x02 => [0x02, 0x04, 0x05, 0x0B, 0x15],
+        0x03 => [0x02, 0x04, 0x05],
+        0x04 => [0x02, 0x04, 0x06, 0x08, 0x0B, 0x10, 0x14],
+        0x09 => [0x02, 0x05, 0x06, 0x07, 0x08],
+        0x13 => [0x02, 0x04, 0x05, 0x07, 0x08, 0x09, 0x0A, 0x11, 0x12, 0x14, 0x18, 0x1A],
+    ];
+
+    /**
+     * Rate classes: one generous class (id 1) with every SNAC in it. Version 3 adds a time
+     * delta and a dropping flag to each class.
+     */
     private function rates(bool $v3): string
     {
         $class = pack('nNNNNNNN', 1, 0x50, 0x09C4, 0x07D0, 0x05DC, 0x0320, 0x0D69, 0x1770);
         if ($v3) $class .= pack('N', 0) . chr(0);
-        return pack('n', 1) . $class . pack('nn', 1, 0);
+        $members = '';
+        $n = 0;
+        foreach (self::RATED as $fam => $subs) foreach ($subs as $sub) { $members .= pack('nn', $fam, $sub); $n++; }
+        return pack('n', 1) . $class . pack('nn', 1, $n) . $members;
     }
 
     private function log(string $m): void

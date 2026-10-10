@@ -132,10 +132,14 @@ final class Wire
     public static function str8(string $s): string { return chr(strlen($s)) . $s; }
     public static function str16(string $s): string { return pack('n', strlen($s)) . $s; }
 
-    /** Screen names compare without case or spaces, as AIM's did. */
+    /**
+     * Screen names compare without case or spaces, as AIM's did. webOS's stock IM transport
+     * names an AIM account "name@aol.com", and AOL took that as the bare name; so does this.
+     */
     public static function normalize(string $sn): string
     {
-        return strtolower(str_replace(' ', '', $sn));
+        $n = strtolower(str_replace(' ', '', $sn));
+        return str_ends_with($n, '@aol.com') ? substr($n, 0, -8) : $n;
     }
 
     public static function hex(string $bin): string { return bin2hex($bin); }

@@ -15,7 +15,8 @@ The plan, the measurements behind it and the order of work are in the shared pla
 | `server/config.example.ini` | Settings; each can also be an `OSCAR_<KEY>` environment variable |
 | `server/data/` | Development accounts (`accounts.json`), buddy lists and offline messages |
 | `test/` | A libpurple 2.14.1 test client (Debian bullseye, the last libpurple with AIM), in Docker |
-| `client/libaim/` | Builds the AIM plugin for webOS CE's libpurple 2.14.13 on the TouchPad |
+| `client/libaim/` | Builds the AIM plugin for webOS CE's libpurple 2.14.13 (TouchPad and Lunacy) |
+| `deploy/` | The systemd unit, the nginx TLS front and the App Museum migration ([DEPLOY.md](DEPLOY.md)) |
 | `ref/` | Pidgin 2.14.2 (the last release with OSCAR) and 2.14.13 sources; not committed |
 | `build/` | Cross-build inputs and output; not committed |
 
@@ -61,9 +62,26 @@ Not yet: buddy icons (0x10), chat rooms (0x0D, 0x0E), the permit and deny lists'
 presence, warnings, TLS (to be nginx's `stream` module in front), and the MySQL account store
 against a live Museum database (`PdoAccounts` is written, not run).
 
-## Deployment (production, planned)
+## Deployment
 
-- `oscar.webosarchive.org` points at the web server; the daemon runs under systemd on 5190.
-- Accounts come from the App Museum's database (`accounts = pdo`), with a `chat_key_md5`
-  column; see the plan doc.
-- Stock devices reach it through one `/etc/hosts` line for `login.messaging.aol.com`.
+[DEPLOY.md](DEPLOY.md): DNS, the systemd unit (`deploy/oscard.service`), the firewall, accounts
+from the App Museum (`deploy/museum-chat-key.sql`), and an optional TLS front in nginx
+(`deploy/nginx-stream.conf`).
+
+## The AIM plugin for webOS CE and Lunacy
+
+`client/libaim/build-touchpad.sh` builds Pidgin 2.14.2's OSCAR code (Pidgin dropped AIM in
+2.14.3) as one `libaim.so` for webOS CE's libpurple 2.14.13. It changes four defaults, so an
+account needs no settings: the login and SSL login hosts become `oscar.webosarchive.org`
+(`OSCAR_SERVER` overrides it), the login is the MD5 one, and the connection is plain.
+`client/touchpad-install.sh` installs it and Palm's AIM account type on a CE TouchPad, and
+`--remove` takes them out.
+
+## Results (2026-10-10)
+
+- Two libpurple 2.14.1 test clients signed in, saw each other and exchanged messages.
+- The reference TouchPad (webOS CE 3.1.0, its own Messaging and transport, with `libaim.so`)
+  signed in and chatted with them.
+- Lunacy, on a Galaxy Tab A7 Lite, chatted with the TouchPad in both directions. It ran first
+  webOS 3.0.5's stack through the stock-device hosts redirect, then CE's Messaging 3.2.0 and
+  transport with `libaim.so`.

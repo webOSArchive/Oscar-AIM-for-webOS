@@ -1,5 +1,6 @@
 #!/bin/sh
-# Builds libpurple's AIM plugin (Pidgin 2.14.2's OSCAR code, the last release that has it)
+# Builds libpurple's AIM plugin (Pidgin 2.14.2's OSCAR code, the last release that has it, with
+# webOS Chat's defaults, below)
 # as one libaim.so for webOS CE's libpurple 2.14.13 on the TouchPad (ARMv7, softfp, glibc).
 #
 # Inputs, under ../../build/touchpad/ (not committed):
@@ -13,10 +14,24 @@ HERE=$(pwd)
 ROOT=$HERE/../..
 B=$ROOT/build/touchpad
 CC=${CC:-$HOME/x-tools/arm-cortex_a8-linux-gnueabi/bin/arm-cortex_a8-linux-gnueabi-gcc}
-OSCAR=$ROOT/ref/pidgin-2.14.2/libpurple/protocols/oscar
+UPSTREAM=$ROOT/ref/pidgin-2.14.2/libpurple/protocols/oscar
 PURPLE=$ROOT/ref/pidgin-2.14.13/libpurple
 OUT=$B/out
 mkdir -p $OUT/obj
+
+# webOS Chat's defaults, so an account needs no settings (webOS CE's transport can't pass any,
+# and stock webOS's validator never did): the login and SSL login hosts are webOS Chat's, the
+# login is the MD5 one (AOL's web login is gone), and the connection is plain until a TLS
+# front is in place. Everything else is Pidgin 2.14.2's OSCAR code as released.
+SERVER=${OSCAR_SERVER:-oscar.webosarchive.org}
+OSCAR=$OUT/oscar-src
+rm -rf $OSCAR && cp -r $UPSTREAM $OSCAR
+sed -i -e "s|#define AIM_DEFAULT_LOGIN_SERVER \"login.oscar.aol.com\"|#define AIM_DEFAULT_LOGIN_SERVER \"$SERVER\"|" \
+       -e "s|#define AIM_DEFAULT_SSL_LOGIN_SERVER \"slogin.oscar.aol.com\"|#define AIM_DEFAULT_SSL_LOGIN_SERVER \"$SERVER\"|" \
+       -e "s|#define OSCAR_DEFAULT_LOGIN OSCAR_CLIENT_LOGIN|#define OSCAR_DEFAULT_LOGIN OSCAR_MD5_LOGIN|" \
+       -e "s|#define OSCAR_DEFAULT_ENCRYPTION OSCAR_OPPORTUNISTIC_ENCRYPTION|#define OSCAR_DEFAULT_ENCRYPTION OSCAR_NO_ENCRYPTION|" \
+       $OSCAR/oscarcommon.h
+[ "$(grep -c "$SERVER\|OSCAR_MD5_LOGIN$\|OSCAR_NO_ENCRYPTION$" $OSCAR/oscarcommon.h)" -ge 4 ] || { echo "oscarcommon.h defaults not applied" >&2; exit 1; }
 
 # The few config.h answers the plugin and libpurple's internal.h ask for.
 cat > $OUT/config.h <<'H'

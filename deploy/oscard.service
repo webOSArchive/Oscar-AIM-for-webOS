@@ -1,0 +1,25 @@
+# systemd unit for webOS Chat's OSCAR server. Install: see ../DEPLOY.md.
+[Unit]
+Description=webOS Chat OSCAR (AIM) server
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oscar
+Group=oscar
+WorkingDirectory=/opt/oscar/server
+ExecStart=/usr/bin/php /opt/oscar/server/bin/oscard /etc/oscar/config.ini
+Restart=on-failure
+RestartSec=5
+# The daemon keeps its buddy lists and offline messages under data_dir (config.ini).
+ReadWritePaths=/var/lib/oscar
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# One process holds every connection (stream_select): allow plenty of descriptors.
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
