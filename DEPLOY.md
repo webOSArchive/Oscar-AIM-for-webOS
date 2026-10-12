@@ -55,6 +55,7 @@ Set, in `/etc/oscar/config.ini`:
 | `data_dir` | `/var/lib/oscar` | Buddy lists and offline messages, one JSON file per user |
 | `accounts` | `file` to start, `pdo` once step 6 is done | Where sign-ins are checked |
 | `debug` | `false` | `true` logs every SNAC in and out |
+| `max_conns`, `max_per_ip`, `signon_timeout`, `offline_max`, `offline_days` | leave unset | The limits ([README](README.md#limits)); raise `max_per_ip` only if many users share one address |
 
 With `accounts = file`, users are in `/var/lib/oscar/accounts.json`, keyed by the screen name
 with case and spaces removed:
@@ -143,11 +144,20 @@ the other as a buddy and a message, to check presence and delivery
 
 - **Logs:** `journalctl -u oscard`. Every connection, sign-in, refusal and drop is a line;
   `debug = true` adds every SNAC.
-- **Updating:** `cd /opt/oscar && sudo git pull && sudo systemctl restart oscard`. A restart
-  drops every session, and clients sign in again by themselves.
+- **Updating:** `cd /opt/oscar && sudo git pull && sudo systemctl restart oscard`. Only a
+  change under `server/` or to `config.ini` needs the restart; the daemon reads both once, at
+  start. A restart drops every session, and clients sign in again by themselves.
+- **System updates:** a PHP or OpenSSL update reaches the daemon only when it restarts.
+  Ubuntu's `needrestart` does that after unattended upgrades; `sudo needrestart -r l` lists
+  services still running old libraries.
+- **Long runs:** the daemon's memory stays flat and its logs go to the journal, which rotates
+  and caps itself. A Museum account whose pass phrase changes or that is closed keeps any
+  session it has open until that session ends.
 - **Backups:** `/var/lib/oscar` (buddy lists, offline messages, and `accounts.json` if used).
 - **Limits:** one process with `stream_select`, which PHP caps at about 1,000 connections
-  (FD_SETSIZE). Past that, the daemon needs an event loop that isn't select-based, or several
-  instances. There is no rate limiting yet beyond what clients obey on their own.
+  (FD_SETSIZE), so `max_conns` is 900. Past that, the daemon needs an event loop that isn't
+  select-based, or several instances. Rates, offline messages, buddy lists and connections per
+  address are capped ([README](README.md#limits)); "refused N connections over the limits" in
+  the log means the caps are being hit.
 - **Security:** stock webOS signs in with an MD5 challenge over plain TCP. That's why the AIM
   password is a chat key separate from the community account's password.

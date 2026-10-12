@@ -20,6 +20,9 @@ interface Accounts
      * Returns the screen name as it should be displayed, or null.
      */
     public function verify(string $sn, string $key, string $hash, bool $md5Pass): ?string;
+
+    /** Whether $sn is an account that can sign in (offline messages are kept only for those). */
+    public function exists(string $sn): bool;
 }
 
 /** Shared by both account stores: the two BUCP hashes. */
@@ -73,6 +76,12 @@ final class FileAccounts implements Accounts
         if (!$a || !isset($a['chatKey'])) return null;
         return self::phraseMatches($key, $hash, $md5Pass, $a['chatKey']) ? ($a['screenName'] ?? $sn) : null;
     }
+
+    public function exists(string $sn): bool
+    {
+        $all = json_decode(@file_get_contents($this->path) ?: '{}', true) ?: [];
+        return isset($all[Wire::normalize($sn)]['chatKey']);
+    }
 }
 
 /**
@@ -92,12 +101,23 @@ final class PdoAccounts implements Accounts
 
     public function verify(string $sn, string $key, string $hash, bool $md5Pass): ?string
     {
+        $row = $this->usable($sn);
+        return $row && self::phraseMatches($key, $hash, $md5Pass, $row['chat_key']) ? $row['username'] : null;
+    }
+
+    public function exists(string $sn): bool
+    {
+        return $this->usable($sn) !== null;
+    }
+
+    /** The row for $sn if it can sign in: a pass phrase, and the Museum's username rule. */
+    private function usable(string $sn): ?array
+    {
         $row = $this->find(Wire::normalize($sn));
         if (!$row || !$row['chat_key']) return null;
         // The Museum's username rule (AccountRepository::usernameError), checked here too:
         // an email or a leading digit is never a screen name, whatever the row holds.
-        if (!preg_match('/^[A-Za-z][A-Za-z0-9._-]{2,31}$/', $row['username'])) return null;
-        return self::phraseMatches($key, $hash, $md5Pass, $row['chat_key']) ? $row['username'] : null;
+        return preg_match('/^[A-Za-z][A-Za-z0-9._-]{2,31}$/', $row['username']) ? $row : null;
     }
 
     /** One retry on a new connection: MySQL drops an idle one (wait_timeout) under a long-running daemon. */
@@ -134,11 +154,21 @@ final class ChainAccounts implements Accounts
         }
         return null;
     }
+
+    public function exists(string $sn): bool
+    {
+        foreach ($this->stores as $s) if ($s->exists($sn)) return true;
+        return false;
+    }
 }
 
 final class UserData
 {
-    public function __construct(private string $dir)
+    /**
+     * $offlineMax messages are kept for each user, each for $offlineDays days, so what one
+     * sender can make the server store is bounded.
+     */
+    public function __construct(private string $dir, private int $offlineMax = 100, private int $offlineDays = 30)
     {
         @mkdir("$dir/feedbag", 0700, true);
         @mkdir("$dir/offline", 0700, true);
@@ -167,12 +197,15 @@ final class UserData
         return array_keys($out);
     }
 
-    public function queueOffline(string $to, array $msg): void
+    /** Keeps a message for $to; false when $to already has as many as are kept. */
+    public function queueOffline(string $to, array $msg): bool
     {
         $f = $this->file('offline', $to);
-        $all = is_file($f) ? (json_decode(file_get_contents($f), true) ?: []) : [];
+        $all = $this->fresh(is_file($f) ? (json_decode(file_get_contents($f), true) ?: []) : []);
+        if (count($all) >= $this->offlineMax) return false;
         $all[] = $msg;
         $this->write($f, $all);
+        return true;
     }
 
     public function takeOffline(string $sn): array
@@ -181,7 +214,27 @@ final class UserData
         if (!is_file($f)) return [];
         $all = json_decode(file_get_contents($f), true) ?: [];
         unlink($f);
-        return $all;
+        return $this->fresh($all);
+    }
+
+    /** Drops expired messages from every queue; returns how many went. */
+    public function sweepOffline(): int
+    {
+        $gone = 0;
+        foreach (glob("{$this->dir}/offline/*.json") ?: [] as $f) {
+            $all = json_decode((string)@file_get_contents($f), true) ?: [];
+            $kept = $this->fresh($all);
+            $gone += count($all) - count($kept);
+            if (!$kept) @unlink($f);
+            elseif (count($kept) !== count($all)) $this->write($f, $kept);
+        }
+        return $gone;
+    }
+
+    private function fresh(array $msgs): array
+    {
+        $since = time() - $this->offlineDays * 86400;
+        return array_values(array_filter($msgs, fn($m) => ($m['time'] ?? 0) >= $since));
     }
 
     private function file(string $kind, string $sn): string

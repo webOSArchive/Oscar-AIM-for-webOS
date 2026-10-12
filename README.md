@@ -47,6 +47,10 @@ Each client signs in with the MD5 login and no TLS, as a webOS device does, adds
 a buddy, and messages it once it is online. Measured 2026-10-10: both sign in, see each other
 come online, and receive each other's messages; a wrong key is refused ("Incorrect password").
 
+`test/limits.php` checks the server's limits against a daemon started with small ones (its
+header has the command). Measured 2026-10-12: all nine checks pass, and two libpurple clients
+still sign in and chat on the same server with the default limits.
+
 ## What the server does
 
 | Family | Handled |
@@ -58,6 +62,26 @@ come online, and receive each other's messages; a wrong key is refused ("Incorre
 | 0x04 ICBM | Parameters, messages (channels 1 and 2 forwarded), delivery acks, typing, offline messages delivered at sign-on |
 | 0x09 privacy | Rights |
 | 0x13 feedbag | Rights, the stored list, add, modify, delete |
+
+### Limits
+
+What one client can make the server hold is bounded, so it can run for months unattended:
+
+- **Rates.** Every SNAC from a session is in the one rate class the server announces (AOL's
+  own class 1 values), and the class is enforced as AOL's servers did: under the limit mark a
+  session's SNACs are refused with error 0x0002 until it slows down, and under the disconnect
+  mark it is dropped. libpurple paces itself by the class, so only a client that ignores it is
+  touched.
+- **Unread output.** A client that leaves more than 1 MB unread is dropped.
+- **Messages.** A message over 8,000 bytes of text is refused (0x000E), as the ICBM parameters
+  say. Offline messages are kept only for screen names that are accounts (others get 0x0004),
+  at most `offline_max` per user (100; then 0x0017, server queue full), each for
+  `offline_days` (30). An hourly sweep removes the expired ones.
+- **Buddy lists.** At most 2,200 items per user, each item's data up to 4 KB; past that the
+  edit is answered "limit exceeded".
+- **Connections.** At most `max_conns` (900, kept under PHP `stream_select`'s 1,024) and
+  `max_per_ip` (16) at once; a connection gets `signon_timeout` (30 s) to reach its session.
+  Connections over a limit are closed at once, and counted in the log once a minute.
 
 Not yet: buddy icons (0x10), chat rooms (0x0D, 0x0E), the permit and deny lists' effect on
 presence, warnings, TLS (to be nginx's `stream` module in front), and keeping buddy lists across

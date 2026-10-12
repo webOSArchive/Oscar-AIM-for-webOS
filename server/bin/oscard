@@ -23,6 +23,11 @@ $accounts = count($stores) === 1 ? $stores[0] : new ChainAccounts($stores);
     array_map('trim', explode(',', $get('listen', '0.0.0.0:5190'))),
     $get('advertise', 'oscar.webosarchive.org:5190'),
     $accounts,
-    new UserData($dataDir),
+    new UserData($dataDir, (int)$get('offline_max', 100), (int)$get('offline_days', 30)),
     (bool)$get('debug', false),
+    [
+        'max_conns' => $get('max_conns', null),
+        'max_per_ip' => $get('max_per_ip', null),
+        'signon_timeout' => $get('signon_timeout', null),
+    ],
 ))->run();

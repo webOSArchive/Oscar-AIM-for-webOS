@@ -21,7 +21,13 @@ final class Conn
     public int $seq;
     public string $kind = 'new';          // new | auth | bos
     public float $lastHeard;
+    public float $opened;
     public bool $closing = false;          // close once $out is flushed
+
+    // Rate state (one class for every SNAC; see Server::rates)
+    public float $rateLevel = Server::RATE_INITIAL;
+    public float $rateLast = 0;
+    public bool $rateLimited = false;
 
     // Authorizer state
     public ?string $authKey = null;
@@ -41,10 +47,10 @@ final class Conn
     /** @var array<string,bool> normalized buddy names */
     public array $buddies = [];
 
-    public function __construct(public $sock, public int $id, public string $peer)
+    public function __construct(public $sock, public int $id, public string $peer, public string $ip)
     {
         $this->seq = random_int(0, 0x7fff);
-        $this->lastHeard = microtime(true);
+        $this->lastHeard = $this->opened = microtime(true);
     }
 }
 
@@ -58,9 +64,47 @@ final class Server
     private array $cookies = [];
     private array $listeners = [];
     private int $nextId = 1;
+    /** @var array<string, int> open connections by peer address */
+    private array $perIp = [];
+    private int $refused = 0;
+    private float $lastRefusedLog = 0;
+    private float $lastSelectFail = 0;
+    private float $lastSweep = 0;
 
     private const IDLE_TIMEOUT = 300;      // seconds without a frame, keepalives included
     private const FAMILIES = [0x0001, 0x0002, 0x0003, 0x0004, 0x0009, 0x0013];
+
+    /**
+     * The rate class every SNAC is in, as sent in rates(): AOL's own class 1 values, in ms.
+     * The level is a moving average of the time between a client's SNACs over a window of
+     * 80; libpurple holds its own sends back before the level reaches the alert mark, so only
+     * a client that ignores the class is ever limited or dropped.
+     */
+    public const RATE_WINDOW = 80;
+    public const RATE_CLEAR = 2500;
+    public const RATE_ALERT = 2000;
+    public const RATE_LIMIT = 1500;
+    public const RATE_DISCONNECT = 800;
+    public const RATE_INITIAL = 3433;
+    public const RATE_MAX = 6000;
+
+    /** Bytes a client may leave unread before it is dropped. */
+    private const MAX_UNREAD = 1 << 20;
+    /** An instant message's text, as the ICBM parameters (04,05) tell clients. */
+    private const MAX_MESSAGE = 8000;
+    /** Buddy list items per user, and the bytes of one item's TLVs. */
+    private const MAX_FEEDBAG_ITEMS = 2200;
+    private const MAX_FEEDBAG_TLVS = 4096;
+
+    /**
+     * Connection limits. stream_select can't watch a descriptor numbered 1024 or more, and
+     * when it fails nothing is served, so max_conns stays well under that.
+     */
+    private array $limits = [
+        'max_conns' => 900,                // every open connection
+        'max_per_ip' => 16,                // from one address
+        'signon_timeout' => 30,            // seconds a connection has to reach its BOS session
+    ];
 
     public function __construct(
         private array $listen,             // ["0.0.0.0:5190", ...]
@@ -68,7 +112,11 @@ final class Server
         private Accounts $accounts,
         private UserData $data,
         private bool $debug = false,
-    ) {}
+        array $limits = [],
+    ) {
+        foreach ($limits as $k => $v) if (isset($this->limits[$k]) && $v !== null) $this->limits[$k] = (int)$v;
+        $this->limits['max_conns'] = max(1, min(1000, $this->limits['max_conns']));
+    }
 
     public function run(): void
     {
@@ -88,7 +136,16 @@ final class Server
                 if ($c->out !== '') $write[] = $c->sock;
             }
             $except = null;
-            if (@stream_select($read, $write, $except, 1) === false) continue;
+            if (@stream_select($read, $write, $except, 1) === false) {
+                // Never spin: say so once a minute and give the loop a breath.
+                if (microtime(true) - $this->lastSelectFail > 60) {
+                    $this->log("stream_select failed with " . count($this->conns) . " connections open");
+                    $this->lastSelectFail = microtime(true);
+                }
+                usleep(200000);
+                $this->tick();
+                continue;
+            }
 
             foreach ($read as $s) {
                 if (in_array($s, $this->listeners, true)) { $this->accept($s); continue; }
@@ -109,9 +166,17 @@ final class Server
     {
         $sock = @stream_socket_accept($listener, 0, $peer);
         if (!$sock) return;
+        $ip = self::ipOf((string)$peer);
+        if (count($this->conns) >= $this->limits['max_conns'] || ($this->perIp[$ip] ?? 0) >= $this->limits['max_per_ip']) {
+            // Accepted and closed at once, so the listener doesn't stay readable.
+            @fclose($sock);
+            $this->refused++;
+            return;
+        }
         stream_set_blocking($sock, false);
-        $c = new Conn($sock, $this->nextId++, (string)$peer);
+        $c = new Conn($sock, $this->nextId++, (string)$peer, $ip);
         $this->conns[$c->id] = $c;
+        $this->perIp[$ip] = ($this->perIp[$ip] ?? 0) + 1;
         $this->log("#{$c->id} connected from {$c->peer}");
         // Both sides send FLAP version 1 on channel 1 as soon as the connection is up.
         $this->send($c, Wire::CH_SIGNON, pack('N', 1));
@@ -155,6 +220,7 @@ final class Server
     {
         if (!isset($this->conns[$c->id])) return;
         unset($this->conns[$c->id]);
+        if (--$this->perIp[$c->ip] <= 0) unset($this->perIp[$c->ip]);
         @fclose($c->sock);
         $this->log("#{$c->id} {$c->sn} dropped: $why");
         if ($c->kind === 'bos' && ($this->online[$c->nsn] ?? null) === $c) {
@@ -168,10 +234,28 @@ final class Server
         $now = microtime(true);
         foreach ($this->conns as $c) {
             if ($now - $c->lastHeard > self::IDLE_TIMEOUT) $this->drop($c, 'silent too long');
+            elseif ($c->kind !== 'bos' && $now - $c->opened > $this->limits['signon_timeout']) $this->drop($c, 'no sign-on in time');
         }
         foreach ($this->cookies as $k => $v) {
             if ($v['until'] < $now) unset($this->cookies[$k]);
         }
+        if ($this->refused && $now - $this->lastRefusedLog > 60) {
+            $this->log("refused {$this->refused} connections over the limits (" . count($this->conns) . " open)");
+            $this->refused = 0;
+            $this->lastRefusedLog = $now;
+        }
+        if ($now - $this->lastSweep > 3600) {
+            $n = $this->data->sweepOffline();
+            if ($n) $this->log("offline messages: $n expired");
+            $this->lastSweep = $now;
+        }
+    }
+
+    /** "1.2.3.4:5190" or "[2001:db8::1]:5190" -> the address alone. */
+    private static function ipOf(string $peer): string
+    {
+        $at = strrpos($peer, ':');
+        return trim($at === false ? $peer : substr($peer, 0, $at), '[]');
     }
 
     private function bySock($s): ?Conn
@@ -184,6 +268,7 @@ final class Server
     {
         $c->out .= Wire::flap($channel, $c->seq++, $data);
         $c->seq &= 0xffff;
+        if (strlen($c->out) > self::MAX_UNREAD) $this->drop($c, 'not reading');
     }
 
     private function snac(Conn $c, int $fam, int $sub, string $body, int $reqid = 0, int $flags = 0): void
@@ -211,7 +296,7 @@ final class Server
                 if ($flags & 0x8000) { $r->raw($r->u16()); }     // optional SNAC TLV block
                 if ($this->debug) $this->log(sprintf("#%d <- %02x,%02x (%d bytes)", $c->id, $fam, $sub, $r->left()));
                 if ($c->kind === 'auth' && $fam === 0x17) $this->auth($c, $sub, $reqid, $r);
-                elseif ($c->kind === 'bos') $this->bos($c, $fam, $sub, $reqid, $r);
+                elseif ($c->kind === 'bos') { if ($this->rateOk($c, $fam, $reqid)) $this->bos($c, $fam, $sub, $reqid, $r); }
                 else $this->log(sprintf("#%d SNAC %02x,%02x before sign-on, ignored", $c->id, $fam, $sub));
                 return;
             case Wire::CH_SIGNOFF:
@@ -473,17 +558,26 @@ final class Server
         $fwd = new Tlvs();
         foreach ($t->list as [$type, $v]) if ($type !== 0x0003 && $type !== 0x0006) $fwd->add($type, $v);
 
+        if ($channel === 1 && strlen($t->get(0x0002) ?? '') > self::MAX_MESSAGE + 64) {
+            $this->snac($c, 0x04, 0x01, pack('n', 0x000E), $reqid);   // incorrect SNAC format
+            return;
+        }
         $o = $this->online[Wire::normalize($to)] ?? null;
         if ($o && $o->ready) {
             $this->snac($o, 0x04, 0x07, $cookie . pack('n', $channel) . $this->userInfo($c) . $fwd->encode());
             if ($t->has(0x0003)) $this->snac($c, 0x04, 0x0C, $cookie . pack('n', $channel) . Wire::str8($to), $reqid);
             return;
         }
-        if ($channel === 1 && $t->has(0x0006)) {
-            $this->data->queueOffline(Wire::normalize($to), [
+        // Kept for a screen name that is an account, up to UserData's limits.
+        if ($channel === 1 && $t->has(0x0006) && $this->accounts->exists($to)) {
+            $kept = $this->data->queueOffline(Wire::normalize($to), [
                 'from' => $c->sn, 'cookie' => bin2hex($cookie), 'channel' => $channel,
                 'tlvs' => bin2hex($fwd->encode()), 'time' => time(),
             ]);
+            if (!$kept) {
+                $this->snac($c, 0x04, 0x01, pack('n', 0x0017), $reqid);   // server queue full
+                return;
+            }
             if ($t->has(0x0003)) $this->snac($c, 0x04, 0x0C, $cookie . pack('n', $channel) . Wire::str8($to), $reqid);
             return;
         }
@@ -527,6 +621,10 @@ final class Server
             $item = ['name' => $name, 'gid' => $gid, 'bid' => $bid, 'type' => $type, 'tlvs' => bin2hex($tl)];
             $fb['items'] = array_values(array_filter($fb['items'],
                 fn($i) => !($i['gid'] === $gid && $i['bid'] === $bid)));
+            if ($sub !== 0x0A && (count($fb['items']) >= self::MAX_FEEDBAG_ITEMS || strlen($tl) > self::MAX_FEEDBAG_TLVS)) {
+                $acks .= pack('n', 0x000C);                      // limit exceeded
+                continue;
+            }
             if ($sub !== 0x0A) $fb['items'][] = $item;
             $acks .= pack('n', 0x0000);
 
@@ -556,12 +654,40 @@ final class Server
     ];
 
     /**
+     * Applies the rate class to a SNAC from a BOS session, as AOL's servers did: under the
+     * limit mark its SNACs are refused (error 0x0002, rate to host) until the level climbs
+     * back over the clear mark; under the disconnect mark the session is dropped.
+     */
+    private function rateOk(Conn $c, int $fam, int $reqid): bool
+    {
+        $now = microtime(true) * 1000;
+        $delta = $c->rateLast ? $now - $c->rateLast : self::RATE_MAX;
+        $c->rateLast = $now;
+        $c->rateLevel = min(self::RATE_MAX, ($c->rateLevel * (self::RATE_WINDOW - 1) + $delta) / self::RATE_WINDOW);
+        if ($c->rateLevel < self::RATE_DISCONNECT) {
+            $this->flush($c);                                // one try at the replies it has coming
+            $this->drop($c, 'over the rate limit');
+            return false;
+        }
+        if ($c->rateLimited && $c->rateLevel >= self::RATE_CLEAR) {
+            $c->rateLimited = false;
+        } elseif (!$c->rateLimited && $c->rateLevel < self::RATE_LIMIT) {
+            $c->rateLimited = true;
+            $this->log("#{$c->id} '{$c->sn}' rate limited");
+        }
+        if (!$c->rateLimited) return true;
+        $this->snac($c, $fam, 0x01, pack('n', 0x0002), $reqid);
+        return false;
+    }
+
+    /**
      * Rate classes: one generous class (id 1) with every SNAC in it. Version 3 adds a time
      * delta and a dropping flag to each class.
      */
     private function rates(bool $v3): string
     {
-        $class = pack('nNNNNNNN', 1, 0x50, 0x09C4, 0x07D0, 0x05DC, 0x0320, 0x0D69, 0x1770);
+        $class = pack('nNNNNNNN', 1, self::RATE_WINDOW, self::RATE_CLEAR, self::RATE_ALERT, self::RATE_LIMIT,
+            self::RATE_DISCONNECT, self::RATE_INITIAL, self::RATE_MAX);
         if ($v3) $class .= pack('N', 0) . chr(0);
         $members = '';
         $n = 0;
