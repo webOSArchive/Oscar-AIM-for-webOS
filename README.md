@@ -59,8 +59,21 @@ come online, and receive each other's messages; a wrong key is refused ("Incorre
 | 0x13 feedbag | Rights, the stored list, add, modify, delete |
 
 Not yet: buddy icons (0x10), chat rooms (0x0D, 0x0E), the permit and deny lists' effect on
-presence, warnings, TLS (to be nginx's `stream` module in front), and the MySQL account store
-against a live Museum database (`PdoAccounts` is written, not run).
+presence, warnings, TLS (to be nginx's `stream` module in front), and keeping buddy lists across
+a username change (chat data is stored by screen name).
+
+## Accounts
+
+Screen names are webOS Account usernames; the password is the account's webOS Chat pass phrase
+(three short words, `accounts.chat_key`, made by the App Museum: on My Account for stock devices,
+by `device.php`'s `getChatCredentials` for webOS CE and Lunacy). `accounts = file,pdo` checks
+`accounts.json` first, so test accounts stay out of the user directory. The phrase is accepted
+with a capital first letter or capital words and without its spaces, since small keyboards add
+capitals by themselves. Only usernames that pass the Museum's rule (3-32 characters, starting with
+a letter, no `@`) can sign in. Measured 2026-10-12 against MariaDB 10.11 with the Museum's
+migration 0012: the database and file accounts, those forms, old clients' plain-password hash and
+`@aol.com` names sign in; wrong and replaced phrases, disabled accounts, accounts without a
+phrase and email usernames are refused; a dropped database connection is reopened.
 
 ## Deployment
 

@@ -1,10 +1,10 @@
--- webOS Chat: each App Museum account's chat key (the AIM password), stored as the hex MD5 of
--- the key, which is all the BUCP login needs. Separate from the account password, which stock
--- devices would otherwise send over plain TCP. Apply to the Museum's database
--- (webos-catalog-service), as a migration beside its own in sql/migrations.
-ALTER TABLE accounts
-    ADD COLUMN chat_key_md5 CHAR(32) NULL DEFAULT NULL AFTER username;
+-- webOS Chat on the App Museum's accounts. The column itself is webos-catalog-service's
+-- migration sql/migrations/0012_chat_key.sql: `accounts.chat_key`, each account's webOS Chat
+-- pass phrase (three short words), stored as is. AIM's sign-in only needs MD5(phrase), so a
+-- hash would protect nothing, and the Museum shows the phrase again on My Account.
+--
+-- After applying that migration, the server's read-only database user (config.ini: db_user,
+-- db_pass), allowed only what a sign-in reads. Use a real password and the database's name:
 
--- The server's read-only account (config.ini: db_user / db_pass).
 -- CREATE USER 'oscar'@'localhost' IDENTIFIED BY '...';
--- GRANT SELECT (username, chat_key_md5, status) ON museum.accounts TO 'oscar'@'localhost';
+-- GRANT SELECT (username, chat_key, status) ON museum.accounts TO 'oscar'@'localhost';

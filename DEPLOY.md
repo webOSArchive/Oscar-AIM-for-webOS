@@ -92,19 +92,23 @@ Then check it from outside the server: `nc -vz oscar.webosarchive.org 5190`.
 
 This replaces `accounts.json` with the community accounts:
 
-1. Apply `deploy/museum-chat-key.sql` to the Museum's database. It adds `chat_key_md5`, the hex
-   MD5 of each account's chat key, to `accounts`.
-2. Give the server a read-only database user (the commented lines in that file).
-3. In `config.ini`: `accounts = pdo`, and `db_dsn`, `db_user`, `db_pass`.
+1. Deploy webos-catalog-service with its webOS Chat changes and apply its migration
+   `sql/migrations/0012_chat_key.sql`. It adds `chat_key` (each account's pass phrase) to
+   `accounts`.
+2. Give the server a read-only database user (the commented lines in
+   `deploy/museum-chat-key.sql`).
+3. In `config.ini`: `accounts = file,pdo` (test accounts in `accounts.json` first, then the
+   Museum), and `db_dsn`, `db_user`, `db_pass`.
 4. `sudo systemctl restart oscard`.
 
-The server then reads `username`, `chat_key_md5` and `status` (active accounts only) at each
-sign-in, so a key rotated on the website works at the next sign-in. Still to build, on the
-Museum side (see the plan doc): generating and rotating the key on the account page, and the
-`device.php` method `getChatCredentials` that hands it to a signed-in CE or Lunacy device.
+The server then reads `username`, `chat_key` and `status` (active accounts only) at each
+sign-in, so a pass phrase replaced on the website works at the next sign-in. People get their
+pass phrase on My Account; webOS CE and Lunacy fetch it with `device.php`'s
+`getChatCredentials`.
 
-Screen names follow AIM's rules. A name of digits only is taken as ICQ, and some characters
-are refused, so community usernames outside those rules need a mapping before they can chat.
+Screen names follow AIM's rules, which is why Museum usernames must start with a letter (AIM
+takes a leading digit for ICQ). An account still named after its email can't chat until it
+picks a username, on My Account or in the device's Accounts app.
 
 ## 7. TLS for the clients that can use it (optional)
 

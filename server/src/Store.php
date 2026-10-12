@@ -3,8 +3,10 @@
  * Where accounts and per-user state live.
  *
  * Accounts answers one question: is this sign-in right, and what is the screen name's
- * display form. FileAccounts reads a JSON file (development); PdoAccounts reads the App
- * Museum's `accounts` table (production, see the plan).
+ * display form. FileAccounts reads a JSON file (development and test accounts);
+ * PdoAccounts reads the App Museum's `accounts` table, where the screen name is the
+ * webOS Account's username and the password its webOS Chat pass phrase (`chat_key`).
+ * ChainAccounts asks several stores in turn, so test accounts can stay in the file.
  *
  * UserData keeps what the server holds for each screen name: the buddy list (feedbag),
  * and messages waiting for a user who was offline. It is files under data/, one per user.
@@ -33,6 +35,25 @@ trait BucpCheck
         }
         return $plain !== null && hash_equals(md5($key . $plain . self::$MAGIC, true), $hash);
     }
+
+    /**
+     * Checks a sign-in against a pass phrase the server knows in full. A pass phrase is
+     * three lowercase words ("maple river lamp"), typed on small keyboards that capitalize
+     * on their own, so the first letter, or each word's, may be capital, and the spaces
+     * may be left out. The client hashes what was typed, so each form is tried.
+     */
+    private static function phraseMatches(string $key, string $hash, bool $md5Pass, string $phrase): bool
+    {
+        $forms = [];
+        foreach ([$phrase, ucfirst($phrase), ucwords($phrase)] as $f) {
+            $forms[$f] = true;
+            $forms[str_replace(' ', '', $f)] = true;
+        }
+        foreach (array_keys($forms) as $f) {
+            if (self::bucpMatches($key, $hash, $md5Pass, md5((string)$f, true), (string)$f)) return true;
+        }
+        return false;
+    }
 }
 
 /**
@@ -50,15 +71,16 @@ final class FileAccounts implements Accounts
         $all = json_decode(@file_get_contents($this->path) ?: '{}', true) ?: [];
         $a = $all[Wire::normalize($sn)] ?? null;
         if (!$a || !isset($a['chatKey'])) return null;
-        $ok = self::bucpMatches($key, $hash, $md5Pass, md5($a['chatKey'], true), $a['chatKey']);
-        return $ok ? ($a['screenName'] ?? $sn) : null;
+        return self::phraseMatches($key, $hash, $md5Pass, $a['chatKey']) ? ($a['screenName'] ?? $sn) : null;
     }
 }
 
 /**
- * The App Museum's accounts: `username` and `chat_key_md5` (hex MD5 of the chat key) on
- * `accounts`, active accounts only. Old clients that hash the plain password (no TLV 0x4C)
- * can't be checked against an MD5, so they are refused; every libpurple since 2.x sends 0x4C.
+ * The App Museum's accounts: `username` and `chat_key` (the webOS Chat pass phrase, stored
+ * as is; see webos-catalog-service's migration 0012) on `accounts`, active accounts only.
+ * Usernames have no spaces and the column's collation ignores case, so the normalized
+ * screen name finds the row directly. A username that is still an email or starts with a
+ * digit never gets a pass phrase on the Museum side, so it can't sign in here.
  */
 final class PdoAccounts implements Accounts
 {
@@ -70,15 +92,47 @@ final class PdoAccounts implements Accounts
 
     public function verify(string $sn, string $key, string $hash, bool $md5Pass): ?string
     {
-        $this->db ??= new PDO($this->dsn, $this->user, $this->pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
-        $q = $this->db->prepare(
-            "SELECT username, chat_key_md5 FROM accounts
-             WHERE LOWER(REPLACE(username, ' ', '')) = ? AND status = 'active' LIMIT 1");
-        $q->execute([Wire::normalize($sn)]);
-        $row = $q->fetch(PDO::FETCH_ASSOC);
-        if (!$row || !$row['chat_key_md5']) return null;
-        $ok = self::bucpMatches($key, $hash, $md5Pass, hex2bin($row['chat_key_md5']), null);
-        return $ok ? $row['username'] : null;
+        $row = $this->find(Wire::normalize($sn));
+        if (!$row || !$row['chat_key']) return null;
+        // The Museum's username rule (AccountRepository::usernameError), checked here too:
+        // an email or a leading digit is never a screen name, whatever the row holds.
+        if (!preg_match('/^[A-Za-z][A-Za-z0-9._-]{2,31}$/', $row['username'])) return null;
+        return self::phraseMatches($key, $hash, $md5Pass, $row['chat_key']) ? $row['username'] : null;
+    }
+
+    /** One retry on a new connection: MySQL drops an idle one (wait_timeout) under a long-running daemon. */
+    private function find(string $name): ?array
+    {
+        for ($try = 0; ; $try++) {
+            try {
+                $this->db ??= new PDO($this->dsn, $this->user, $this->pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+                $q = $this->db->prepare(
+                    "SELECT username, chat_key FROM accounts WHERE username = ? AND status = 'active' LIMIT 1");
+                $q->execute([$name]);
+                return $q->fetch(PDO::FETCH_ASSOC) ?: null;
+            } catch (PDOException $e) {
+                $this->db = null;
+                if ($try > 0) {
+                    error_log("account lookup failed: " . $e->getMessage());
+                    return null;
+                }
+            }
+        }
+    }
+}
+
+/** Asks each store in turn; the first that accepts the sign-in wins. */
+final class ChainAccounts implements Accounts
+{
+    /** @param Accounts[] $stores */
+    public function __construct(private array $stores) {}
+
+    public function verify(string $sn, string $key, string $hash, bool $md5Pass): ?string
+    {
+        foreach ($this->stores as $s) {
+            if (($name = $s->verify($sn, $key, $hash, $md5Pass)) !== null) return $name;
+        }
+        return null;
     }
 }
 

@@ -11,10 +11,13 @@ $cfg = is_file($ini) ? parse_ini_file($ini, false, INI_SCANNER_TYPED) : [];
 $get = fn(string $k, $d) => getenv('OSCAR_' . strtoupper($k)) ?: ($cfg[$k] ?? $d);
 
 $dataDir = $get('data_dir', __DIR__ . '/../data');
-$accounts = match ($get('accounts', 'file')) {
+// accounts: "file", "pdo", or several in the order to ask them ("file,pdo").
+$stores = array_map(fn($a) => match ($a) {
     'pdo' => new PdoAccounts($get('db_dsn', ''), $get('db_user', ''), $get('db_pass', '')),
-    default => new FileAccounts("$dataDir/accounts.json"),
-};
+    'file' => new FileAccounts("$dataDir/accounts.json"),
+    default => throw new InvalidArgumentException("accounts: unknown store '$a'"),
+}, array_map('trim', explode(',', $get('accounts', 'file'))));
+$accounts = count($stores) === 1 ? $stores[0] : new ChainAccounts($stores);
 
 (new Server(
     array_map('trim', explode(',', $get('listen', '0.0.0.0:5190'))),
