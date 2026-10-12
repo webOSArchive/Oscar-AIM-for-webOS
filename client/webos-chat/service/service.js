@@ -22,6 +22,11 @@
  * that is the first two minutes or so after a sign-in during first use, before the transport's
  * runtime is laid into cryptofs. So an account counts as made only once the transport has
  * written its login state for it, and one it never took is made again.
+ *
+ * Removing the webOS Chat account in Accounts turns chat off: the service remembers the account
+ * it made (STATE), and when that account is gone without the service having removed it, it
+ * makes no other until chat is added again in Accounts (the setup page calls enable). Signing
+ * out of the webOS Account forgets that, as it forgets the rest of the account's data.
  */
 var Foundations = IMPORTS.foundations;
 var Class = Foundations.Class;
@@ -35,9 +40,19 @@ var Chat = {
 	TEMPLATE: "org.webosarchive.chat",
 	PROVIDER: "org.webosarchive.chat.aim",
 	URL: "https://appcatalog.webosarchive.org/WebService/device.php?m=getChatCredentials",
+	STATE: "/var/preferences/com.palm.webosarchive.chat/state.json",
 
 	log: function () {
 		console.log("webos-chat: " + Array.prototype.slice.call(arguments).join(" "));
+	},
+
+	/** A command's reply from (error, outcome, screenName). */
+	reply: function (future) {
+		return function (err, outcome, screenName) {
+			if (err) Chat.log("failed:", err);
+			future.result = err ? { returnValue: false, errorText: String(err) }
+				: { returnValue: true, outcome: outcome, screenName: screenName || "" };
+		};
 	},
 
 	/** A bus call as (error, result), errors as text. */
@@ -70,6 +85,20 @@ var Chat = {
 		});
 	},
 
+	/** {accountId: the account this service made, off: chat turned off in Accounts}. */
+	state: function () {
+		try { return JSON.parse(require("fs").readFileSync(Chat.STATE, "utf8")) || {}; } catch (e) { return {}; }
+	},
+
+	saveState: function (st) {
+		var fs = require("fs"), dir = Chat.STATE.replace(/\/[^\/]*$/, "");
+		try {
+			try { fs.mkdirSync(dir, 448); } catch (e) {}
+			fs.writeFileSync(Chat.STATE + ".new", JSON.stringify(st));
+			fs.renameSync(Chat.STATE + ".new", Chat.STATE);
+		} catch (e) { Chat.log("saving the state failed:", e); }
+	},
+
 	/** The webOS Chat accounts on this device (there should be at most one). */
 	chatAccounts: function (done) {
 		Chat.call("palm://com.palm.service.accounts/", "listAccounts", { templateId: Chat.TEMPLATE }, function (err, r) {
@@ -79,7 +108,9 @@ var Chat = {
 
 	remove: function (accounts, done) {
 		if (!accounts.length) return done();
-		var a = accounts[0];
+		var a = accounts[0], st = Chat.state();
+		// The service's own removals never count as chat turned off.
+		if (st.accountId === a._id) { delete st.accountId; Chat.saveState(st); }
 		Chat.log("removing the webOS Chat account for", a.username);
 		Chat.call("palm://com.palm.service.accounts/", "deleteAccount", { accountId: a._id }, function (err) {
 			if (err) Chat.log("deleteAccount failed:", err);
@@ -135,7 +166,12 @@ var Chat = {
 		Chat.create(cred, function (err, id) {
 			if (err) return done(err);
 			Chat.taken(id, 10, function (ok) {
-				if (ok) return done(null, "created");
+				if (ok) {
+					var st = Chat.state();
+					st.accountId = id;
+					Chat.saveState(st);
+					return done(null, "created");
+				}
 				Chat.log("the IM transport didn't take the account", id);
 				Chat.remove([{ _id: id, username: cred.screenName }], function () {
 					if (tries <= 1) return done("the IM transport didn't take the account; trying again at the next run");
@@ -161,22 +197,24 @@ var Chat = {
 	},
 
 	/**
-	 * done(error, outcome): "signed-out", "username-required", "unchanged", "created".
-	 * $profileChanged: the device's webOS Account record has just changed.
+	 * done(error, outcome, screenName): outcome "signed-out", "username-required", "off",
+	 * "unchanged" or "created". $how.profileChanged: the device's webOS Account record has just
+	 * changed. $how.enable: chat was added in Accounts, so it is on again.
 	 */
-	sync: function (profileChanged, done) {
-		Chat.token(profileChanged ? 5 : 1, function (err, token) {
+	sync: function (how, done) {
+		Chat.token(how.profileChanged ? 5 : 1, function (err, token) {
 			if (err) return done(err);
-			var t = { token: token };
-			if (!t.token) {
-				// Signed out: the webOS Chat account goes with the rest of the account's data.
+			if (!token) {
+				// Signed out: the webOS Chat account goes with the rest of the account's data,
+				// and so does chat having been turned off.
+				Chat.saveState({});
 				return Chat.chatAccounts(function (err, accounts) {
 					if (err) return done("listAccounts failed: " + err);
 					if (!accounts.length) Chat.log("no webOS Account signed in; nothing to do");
 					Chat.remove(accounts, function () { done(null, "signed-out"); });
 				});
 			}
-			Chat.fetchCredentials(t.token, function (err, status, body) {
+			Chat.fetchCredentials(token, function (err, status, body) {
 				if (err) return done(err);
 				if (status === 409) {
 					Chat.log("the webOS Account needs a username before it can chat");
@@ -187,10 +225,29 @@ var Chat = {
 				}
 				Chat.chatAccounts(function (err, accounts) {
 					if (err) return done("listAccounts failed: " + err);
+					var st = Chat.state();
+					var present = function (id) {
+						for (var i = 0; i < accounts.length; i++) if (accounts[i]._id === id) return true;
+						return false;
+					};
+					if (how.enable) {
+						st.off = false;
+					} else if (st.accountId && !present(st.accountId)) {
+						Chat.log("the webOS Chat account was removed in Accounts; chat is off until it is added again");
+						st.off = true;
+						delete st.accountId;
+					}
+					Chat.saveState(st);
+					if (st.off) return done(null, "off", body.screenName);
+					var finish = function (err, outcome) { done(err, outcome, body.screenName); };
 					var keep = accounts.length === 1 ? accounts[0] : null;
 					var after = function (same) {
-						if (same) return done(null, "unchanged");
-						Chat.remove(accounts, function () { Chat.createTaken(body, 5, done); });
+						if (same) {
+							// One made before the service kept state is taken as its own.
+							if (st.accountId !== keep._id) { st.accountId = keep._id; Chat.saveState(st); }
+							return finish(null, "unchanged");
+						}
+						Chat.remove(accounts, function () { Chat.createTaken(body, 5, finish); });
 					};
 					if (!keep) return after(false);
 					Chat.matches(keep, body, function (same) {
@@ -216,10 +273,7 @@ var SyncCommandAssistant = Class.create({
 		// Called by the activities; the service framework adopts the activity and, when this
 		// command ends, has complete() below end it.
 		var args = this.controller.args || {};
-		Chat.sync(!!args.profileChanged, function (err, outcome) {
-			if (err) Chat.log("sync failed:", err);
-			future.result = err ? { returnValue: false, errorText: String(err) } : { returnValue: true, outcome: outcome };
-		});
+		Chat.sync({ profileChanged: !!args.profileChanged }, Chat.reply(future));
 	},
 
 	// An activity completed without restart is over, so the hourly and profile-watch
@@ -234,3 +288,11 @@ var SyncCommandAssistant = Class.create({
 		return activity.complete(!!args.recur && !failed);
 	}
 });
+
+// The setup page in Accounts (org.webosarchive.chat.setup): chat added.
+var EnableCommandAssistant = Class.create({
+	run: function (future) {
+		Chat.sync({ enable: true }, Chat.reply(future));
+	}
+});
+

@@ -1,0 +1,11 @@
+{
+	"id": "org.webosarchive.chat.setup",
+	"version": "1.0.0",
+	"vendor": "webOS Archive",
+	"type": "web",
+	"main": "setup.html",
+	"title": "webOS Chat",
+	"icon": "icon.png",
+	"uiRevision": 2,
+	"visible": false
+}

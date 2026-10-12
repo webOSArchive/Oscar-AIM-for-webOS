@@ -11,6 +11,11 @@
 					"name": "sync",
 					"assistant": "SyncCommandAssistant",
 					"commandTimeout": 360
+				},
+				{
+					"name": "enable",
+					"assistant": "EnableCommandAssistant",
+					"commandTimeout": 360
 				}
 			]
 		}

@@ -5,6 +5,9 @@
 		"loc_32x32": "images/webos-chat-32x32.png",
 		"loc_48x48": "images/webos-chat-48x48.png"
 	},
+	"validator": {
+		"customUI": { "appId": "org.webosarchive.chat.setup", "name": "setup.html" }
+	},
 	"readPermissions": [
 		"com.palm.webosarchive.chat",
 		"com.palm.imlibpurple",

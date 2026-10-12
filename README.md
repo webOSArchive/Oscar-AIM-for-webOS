@@ -136,6 +136,15 @@ cryptofs a couple of minutes after a sign-in during first use. The hourly and si
 are `persist`ent, as Palm's periodic ones were. The type has its own icons
 (`accounts/draw-icons.py` draws them).
 
+In Accounts, the type has its own page (`validator.customUI`), from a hidden app,
+`client/webos-chat/app/org.webosarchive.chat.setup`, so no password is ever asked for. Adding
+webOS Chat in Add Account turns chat on (the service's `enable` makes the account and the page
+says so, or says to sign in or choose a username first). Removing the account (Accounts' own
+Remove Account) turns chat off: the service remembers the account it made in
+`/var/preferences/com.palm.webosarchive.chat/state.json`, and when that account is gone without
+its doing, no run makes another until webOS Chat is added again. Signing out of the webOS
+Account forgets that.
+
 Lunacy lays it into its ROM (its `fetch-assets.sh`, at a pinned commit of this repository).
 Measured 2026-10-12 on a Galaxy Tab A7 Lite against the live server: the account was made and
 signed in. webOS CE builds it in from its own repository (webos-doctor-ce). There, the plugin
