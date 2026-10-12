@@ -157,6 +157,12 @@ $got = 0;
 while ($s = $bob->snac(1)) if ($s[0] === 0x04 && $s[1] === 0x07) $got++;
 check($got === 3, "bob receives $got offline messages");
 
+// 3b. A buddy list kept by the client (03,04, no feedbag): adding someone online shows them.
+$alice->sendSnac(0x03, 0x04, Wire::str8('bob'), 30);
+$seen = false;
+while ($s = $alice->snac(1)) if ($s[0] === 0x03 && $s[1] === 0x0B) $seen = true;
+check($seen, "a buddy added with 03,04 is reported online");
+
 // 4. The rate class: typing notifications as fast as they can go.
 $typing = random_bytes(8) . pack('n', 1) . Wire::str8('bob') . pack('n', 2);
 $firstLimited = null;

@@ -442,6 +442,20 @@ final class Server
             case 0x00030002:
                 $this->snac($c, 0x03, 0x03, (new Tlvs())->u16(0x0001, 1000)->u16(0x0002, 3000)->u16(0x0003, 512)->encode(), $reqid);
                 return;
+            case 0x00030004:                                     // add buddies (a list kept by the client)
+            case 0x00030005:                                     // remove buddies
+                // Clients that keep their buddy list themselves send it here instead of
+                // editing the feedbag; without it, nobody they add ever shows online to them.
+                while ($r->left() > 0) {
+                    $b = Wire::normalize($r->str8());
+                    if ($b === '') continue;
+                    if ($sub === 0x05) { unset($c->buddies[$b]); continue; }
+                    if (!isset($c->buddies[$b]) && count($c->buddies) >= self::MAX_FEEDBAG_ITEMS) break;
+                    $c->buddies[$b] = true;
+                    $o = $this->online[$b] ?? null;
+                    if ($c->ready && $o && $o->ready) $this->snac($c, 0x03, 0x0B, $this->userInfo($o));
+                }
+                return;
 
             // -- 0x04 ICBM --
             case 0x00040002:                                     // set parameters
