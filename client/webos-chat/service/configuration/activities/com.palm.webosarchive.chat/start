@@ -1,0 +1,14 @@
+{
+	"start": true,
+	"replace": true,
+	"activity": {
+		"name": "webOS Chat start",
+		"description": "Set up webOS Chat from the webOS Account at start",
+		"type": { "background": true },
+		"requirements": { "internet": true },
+		"callback": {
+			"method": "palm://com.palm.webosarchive.chat/sync",
+			"params": {}
+		}
+	}
+}

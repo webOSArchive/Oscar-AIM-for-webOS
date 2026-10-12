@@ -16,6 +16,7 @@ The plan, the measurements behind it and the order of work are in the shared pla
 | `server/data/` | Development accounts (`accounts.json`), buddy lists and offline messages |
 | `test/` | A libpurple 2.14.1 test client (Debian bullseye, the last libpurple with AIM), in Docker |
 | `client/libaim/` | Builds the AIM plugin for webOS CE's libpurple 2.14.13 (TouchPad and Lunacy) |
+| `client/webos-chat/` | The webOS Chat account type and service: sign in to chat with the webOS Account |
 | `deploy/` | The systemd unit, the nginx TLS front and the App Museum migration ([DEPLOY.md](DEPLOY.md)) |
 | `ref/` | Pidgin 2.14.2 (the last release with OSCAR) and 2.14.13 sources; not committed |
 | `build/` | Cross-build inputs and output; not committed |
@@ -89,6 +90,21 @@ account needs no settings: the login and SSL login hosts become `oscar.webosarch
 (`OSCAR_SERVER` overrides it), the login is the MD5 one, and the connection is plain.
 `client/touchpad-install.sh` installs it and Palm's AIM account type on a CE TouchPad, and
 `--remove` takes them out.
+
+## Signing in with the webOS Account
+
+`client/webos-chat/` is what lets an up-to-date device chat with no pass phrase typed: an account
+type, `org.webosarchive.chat`, and a JS service, `com.palm.webosarchive.chat`. The service runs at
+start and hourly. With the webOS Community Account signed in, it gets the account's token
+(`com.palm.accountservices/getAccountToken`), trades it at the App Museum for the screen name and
+pass phrase (`device.php?m=getChatCredentials`, over `/usr/bin/curl`, since node 0.4's TLS can't
+reach the Museum), and keeps one account of that type with them. The type carries AIM's
+capability, so the IM transport and `libaim.so` sign it in. Its own type is needed because Palm's
+AIM template only lets Contacts and Messaging create accounts.
+
+Lunacy lays it into its ROM (its `fetch-assets.sh`, from `Workbench/vendor/webos-chat`). Measured
+2026-10-12 on a Galaxy Tab A7 Lite against the live server: the account was made and signed in.
+A webOS CE TouchPad still needs an installer for it, with `ls2` role files for the service.
 
 ## Results (2026-10-10)
 

@@ -1,0 +1,15 @@
+{
+	"start": true,
+	"replace": true,
+	"activity": {
+		"name": "webOS Chat hourly",
+		"description": "Follow a webOS Account sign-in, a new username or a new pass phrase",
+		"type": { "background": true },
+		"requirements": { "internet": true },
+		"schedule": { "interval": "1h" },
+		"callback": {
+			"method": "palm://com.palm.webosarchive.chat/sync",
+			"params": {}
+		}
+	}
+}

@@ -1,0 +1,18 @@
+{
+	"description": "webOS Chat: the AIM account for the signed-in webOS Account",
+	"engine": "node",
+	"services": [
+		{
+			"name": "com.palm.webosarchive.chat",
+			"description": "Sets up webOS Chat from the webOS Account",
+			"assistant": "ServiceAssistant",
+			"commands": [
+				{
+					"name": "sync",
+					"assistant": "SyncCommandAssistant",
+					"commandTimeout": 60
+				}
+			]
+		}
+	]
+}

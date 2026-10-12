@@ -1,0 +1,39 @@
+{
+	"templateId": "org.webosarchive.chat",
+	"loc_name": "webOS Chat",
+	"icon": {
+		"loc_32x32": "../com.palm.aol/images/aim-32x32.png",
+		"loc_48x48": "../com.palm.aol/images/aim-logo.png"
+	},
+	"readPermissions": [
+		"com.palm.webosarchive.chat",
+		"com.palm.imlibpurple",
+		"com.palm.app.messaging",
+		"com.palm.app.contacts",
+		"com.palm.service.contacts",
+		"com.palm.service.contacts.linker"
+	],
+	"writePermissions": [
+		"com.palm.webosarchive.chat"
+	],
+	"capabilityProviders": [
+		{
+			"capability": "MESSAGING",
+			"capabilitySubtype": "IM",
+			"id": "org.webosarchive.chat.aim",
+			"loc_name": "webOS Chat",
+			"loc_shortName": "Chat",
+			"icon": {
+				"splitter": "../com.palm.aol/images/aim-32x32.png"
+			},
+			"implementation": "palm://com.palm.imlibpurple/",
+			"onEnabled": "palm://com.palm.imlibpurple/onEnabled",
+			"readOnlyData": true,
+			"serviceName": "type_aim",
+			"dbkinds": {
+				"immessage": "com.palm.immessage.libpurple:1",
+				"imcommand": "com.palm.imcommand.libpurple:1"
+			}
+		}
+	]
+}
