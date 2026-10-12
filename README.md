@@ -128,9 +128,23 @@ reach the Museum), and keeps one account of that type with them. The type carrie
 capability, so the IM transport and `libaim.so` sign it in. Its own type is needed because Palm's
 AIM template only lets Contacts and Messaging create accounts.
 
-Lunacy lays it into its ROM (its `fetch-assets.sh`, from `Workbench/vendor/webos-chat`). Measured
-2026-10-12 on a Galaxy Tab A7 Lite against the live server: the account was made and signed in.
-A webOS CE TouchPad still needs an installer for it, with `ls2` role files for the service.
+The accounts service tells the transport about a new account only once (`onEnabled`), so the
+service counts an account as made only when the transport has written its login state
+(`com.palm.imloginstate.libpurple:1`, readable by `com.palm.*`). An account the transport didn't
+take, because it couldn't start yet, is made again: on webOS CE the transport's runtime reaches
+cryptofs a couple of minutes after a sign-in during first use. The hourly and sign-in activities
+are `persist`ent, as Palm's periodic ones were. The type has its own icons
+(`accounts/draw-icons.py` draws them).
+
+Lunacy lays it into its ROM (its `fetch-assets.sh`, at a pinned commit of this repository).
+Measured 2026-10-12 on a Galaxy Tab A7 Lite against the live server: the account was made and
+signed in. webOS CE builds it in from its own repository (webos-doctor-ce). There, the plugin
+goes into the Synergy plugin store (`/media/cryptofs/synergy-purple-plugins`, which the
+transport mounts over `/usr/lib/purple-2`), and a service in the root filesystem has its
+activities read from `/etc/palm/activities/com.palm.webosarchive.chat/`, a copy of
+`service/configuration/activities/com.palm.webosarchive.chat/`. The service needs `ls2` roles
+that let it call `com.palm.accountservices`, `com.palm.service.accounts`,
+`com.palm.activitymanager` and `com.palm.db`.
 
 ## Results (2026-10-10)
 

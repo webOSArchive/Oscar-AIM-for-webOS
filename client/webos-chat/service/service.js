@@ -16,6 +16,12 @@
  * clears the webOS Account's own data. With a username that is still an email, or when the
  * profile can't be read, it changes nothing. ES5 and curl, as on a TouchPad (node 0.4's TLS
  * can't reach the Museum; the community account's service uses curl too).
+ *
+ * The accounts service tells the IM transport about a new account once (onEnabled) and never
+ * again, so an account made while the transport can't start would never sign in. On webOS CE
+ * that is the first two minutes or so after a sign-in during first use, before the transport's
+ * runtime is laid into cryptofs. So an account counts as made only once the transport has
+ * written its login state for it, and one it never took is made again.
  */
 var Foundations = IMPORTS.foundations;
 var Class = Foundations.Class;
@@ -88,10 +94,11 @@ var Chat = {
 			alias: cred.screenName,
 			capabilityProviders: [{ id: Chat.PROVIDER }],
 			credentials: { common: { password: cred.chatKey } }
-		}, function (err) {
-			if (err) return done("createAccount failed: " + err);
+		}, function (err, r) {
+			var id = r && (r._id || (r.result && r.result._id));
+			if (err || !id) return done("createAccount failed: " + (err || JSON.stringify(r)));
 			Chat.log("created the webOS Chat account for", cred.screenName);
-			done(null, "created");
+			done(null, id);
 		});
 	},
 
@@ -100,6 +107,41 @@ var Chat = {
 		if (String(account.username).toLowerCase() !== String(cred.screenName).toLowerCase()) return done(false);
 		Chat.call("palm://com.palm.service.accounts/", "readCredentials", { accountId: account._id, name: "common" }, function (err, r) {
 			done(!err && r && r.credentials && r.credentials.password === cred.chatKey);
+		});
+	},
+
+	/**
+	 * Whether the IM transport has taken the account: when the accounts service tells it about
+	 * one (onEnabled) it writes the account's login state, which com.palm.* may read. Asked
+	 * again every 3 s up to $tries times. Measured on webOS CE 3.1.0: that id may read it.
+	 */
+	taken: function (accountId, tries, done) {
+		Chat.call("palm://com.palm.db/", "find", {
+			query: { from: "com.palm.imloginstate.libpurple:1", where: [{ prop: "accountId", op: "=", val: accountId }] }
+		}, function (err, r) {
+			// A failed read is no evidence the transport missed it, and remaking it won't help.
+			if (err) Chat.log("reading the login state failed:", err);
+			if (err || (r && r.results && r.results.length)) return done(true);
+			if (tries <= 1) return done(false);
+			setTimeout(function () { Chat.taken(accountId, tries - 1, done); }, 3000);
+		});
+	},
+
+	/**
+	 * Makes the account and waits for the transport to take it. One it doesn't take in 30 s
+	 * (the transport couldn't start) is removed and made again 20 s later, up to $tries times.
+	 */
+	createTaken: function (cred, tries, done) {
+		Chat.create(cred, function (err, id) {
+			if (err) return done(err);
+			Chat.taken(id, 10, function (ok) {
+				if (ok) return done(null, "created");
+				Chat.log("the IM transport didn't take the account", id);
+				Chat.remove([{ _id: id, username: cred.screenName }], function () {
+					if (tries <= 1) return done("the IM transport didn't take the account; trying again at the next run");
+					setTimeout(function () { Chat.createTaken(cred, tries - 1, done); }, 20000);
+				});
+			});
 		});
 	},
 
@@ -148,9 +190,17 @@ var Chat = {
 					var keep = accounts.length === 1 ? accounts[0] : null;
 					var after = function (same) {
 						if (same) return done(null, "unchanged");
-						Chat.remove(accounts, function () { Chat.create(body, done); });
+						Chat.remove(accounts, function () { Chat.createTaken(body, 5, done); });
 					};
-					if (keep) Chat.matches(keep, body, after); else after(false);
+					if (!keep) return after(false);
+					Chat.matches(keep, body, function (same) {
+						if (!same) return after(false);
+						// An account the transport never took never signs in, so it is made again.
+						Chat.taken(keep._id, 1, function (ok) {
+							if (!ok) Chat.log("the IM transport never took the account; making it again");
+							after(ok);
+						});
+					});
 				});
 			});
 		});

@@ -4,7 +4,7 @@
 	"activity": {
 		"name": "webOS Chat profile",
 		"description": "Follow the webOS Account signing in or out on this device",
-		"type": { "background": true },
+		"type": { "background": true, "persist": true },
 		"trigger": {
 			"method": "palm://com.palm.db/find",
 			"params": {

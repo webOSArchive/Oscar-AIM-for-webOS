@@ -10,7 +10,7 @@
 				{
 					"name": "sync",
 					"assistant": "SyncCommandAssistant",
-					"commandTimeout": 60
+					"commandTimeout": 360
 				}
 			]
 		}

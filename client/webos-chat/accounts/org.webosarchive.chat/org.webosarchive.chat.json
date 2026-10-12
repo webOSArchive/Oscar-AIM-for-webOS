@@ -2,8 +2,8 @@
 	"templateId": "org.webosarchive.chat",
 	"loc_name": "webOS Chat",
 	"icon": {
-		"loc_32x32": "../com.palm.aol/images/aim-32x32.png",
-		"loc_48x48": "../com.palm.aol/images/aim-logo.png"
+		"loc_32x32": "images/webos-chat-32x32.png",
+		"loc_48x48": "images/webos-chat-48x48.png"
 	},
 	"readPermissions": [
 		"com.palm.webosarchive.chat",
@@ -24,7 +24,7 @@
 			"loc_name": "webOS Chat",
 			"loc_shortName": "Chat",
 			"icon": {
-				"splitter": "../com.palm.aol/images/aim-32x32.png"
+				"splitter": "images/webos-chat-32x32.png"
 			},
 			"implementation": "palm://com.palm.imlibpurple/",
 			"onEnabled": "palm://com.palm.imlibpurple/onEnabled",
