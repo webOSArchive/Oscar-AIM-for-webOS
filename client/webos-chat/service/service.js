@@ -7,10 +7,15 @@
  * account carries AIM's capability, so Palm's IM transport and libaim.so (which defaults to
  * oscar.webosarchive.org) sign it in like any AIM account; nobody types a pass phrase.
  *
- * It runs at start and hourly (configuration/activities), which follows a webOS Account
- * sign-in, a username change and a pass phrase replaced on the website. Signed out, or with
- * a username that is still an email, it changes nothing. ES5 and curl, as on a TouchPad
- * (node 0.4's TLS can't reach the Museum; the community account's service uses curl too).
+ * It runs at start, hourly (a username or pass phrase changed on the website), and whenever
+ * the device's webOS Account record changes (configuration/activities): signing in renames it
+ * to the member, signing out back to a local name. The token itself (com.palm.palmprofile:1)
+ * is only the account service's to read, so it is asked for, and since signing in renames the
+ * record before it saves the token, a change with no token yet is asked about again for a
+ * few seconds before it counts as signed out. Signed out, it removes the webOS Chat account, as signing out
+ * clears the webOS Account's own data. With a username that is still an email, or when the
+ * profile can't be read, it changes nothing. ES5 and curl, as on a TouchPad (node 0.4's TLS
+ * can't reach the Museum; the community account's service uses curl too).
  */
 var Foundations = IMPORTS.foundations;
 var Class = Foundations.Class;
@@ -98,12 +103,36 @@ var Chat = {
 		});
 	},
 
-	/** done(error, outcome): "signed-out", "username-required", "unchanged", "created". */
-	sync: function (done) {
+	/**
+	 * The account token, asked again every 5 s up to $tries times while there is none. A
+	 * signed-out device answers NO_TOKEN ("Token could not be fetched"); that is "" here, and
+	 * any other failure (no Community Account installed) is an error.
+	 */
+	token: function (tries, done) {
 		Chat.call("palm://com.palm.accountservices/", "getAccountToken", {}, function (err, t) {
-			if (err || !t || !t.token) {
-				Chat.log("no webOS Account signed in; nothing to do");
-				return done(null, "signed-out");
+			var none = err && /NO_TOKEN|Token could not be fetched/.test(err);
+			if ((err && !none) || (!err && !t)) return done("getAccountToken failed: " + (err || "no reply"));
+			var token = none ? "" : t.token || "";
+			if (token || tries <= 1) return done(null, token);
+			setTimeout(function () { Chat.token(tries - 1, done); }, 5000);
+		});
+	},
+
+	/**
+	 * done(error, outcome): "signed-out", "username-required", "unchanged", "created".
+	 * $profileChanged: the device's webOS Account record has just changed.
+	 */
+	sync: function (profileChanged, done) {
+		Chat.token(profileChanged ? 5 : 1, function (err, token) {
+			if (err) return done(err);
+			var t = { token: token };
+			if (!t.token) {
+				// Signed out: the webOS Chat account goes with the rest of the account's data.
+				return Chat.chatAccounts(function (err, accounts) {
+					if (err) return done("listAccounts failed: " + err);
+					if (!accounts.length) Chat.log("no webOS Account signed in; nothing to do");
+					Chat.remove(accounts, function () { done(null, "signed-out"); });
+				});
 			}
 			Chat.fetchCredentials(t.token, function (err, status, body) {
 				if (err) return done(err);
@@ -134,11 +163,24 @@ var ServiceAssistant = Class.create({
 
 var SyncCommandAssistant = Class.create({
 	run: function (future) {
-		// Called by the start and hourly activities; the service framework adopts the
-		// activity and completes it when this command ends (the hourly one recurs).
-		Chat.sync(function (err, outcome) {
+		// Called by the activities; the service framework adopts the activity and, when this
+		// command ends, has complete() below end it.
+		var args = this.controller.args || {};
+		Chat.sync(!!args.profileChanged, function (err, outcome) {
 			if (err) Chat.log("sync failed:", err);
 			future.result = err ? { returnValue: false, errorText: String(err) } : { returnValue: true, outcome: outcome };
 		});
+	},
+
+	// An activity completed without restart is over, so the hourly and profile-watch
+	// activities, whose callbacks say "recur", are completed with it; the start one isn't.
+	// A trigger that answered with an error (a watch db8 refused) would only fire again at
+	// once, so that activity is ended instead, and says why.
+	complete: function (activity) {
+		var args = (this.controller && this.controller.args) || {};
+		var trigger = args.$activity && args.$activity.trigger;
+		var failed = trigger && trigger.returnValue === false;
+		if (failed) Chat.log("activity trigger failed, ending it:", trigger.errorText || JSON.stringify(trigger));
+		return activity.complete(!!args.recur && !failed);
 	}
 });

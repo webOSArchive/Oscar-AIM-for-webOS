@@ -119,7 +119,9 @@ account needs no settings: the login and SSL login hosts become `oscar.webosarch
 
 `client/webos-chat/` is what lets an up-to-date device chat with no pass phrase typed: an account
 type, `org.webosarchive.chat`, and a JS service, `com.palm.webosarchive.chat`. The service runs at
-start and hourly. With the webOS Community Account signed in, it gets the account's token
+start, hourly, and whenever the device's webOS Account record changes (a db8 `find` watch on
+`com.palm.account:1` for the `com.palm.palmprofile` template, which signing in and out
+rename), so signing in sets chat up at once and signing out removes the chat account. With the webOS Community Account signed in, it gets the account's token
 (`com.palm.accountservices/getAccountToken`), trades it at the App Museum for the screen name and
 pass phrase (`device.php?m=getChatCredentials`, over `/usr/bin/curl`, since node 0.4's TLS can't
 reach the Museum), and keeps one account of that type with them. The type carries AIM's

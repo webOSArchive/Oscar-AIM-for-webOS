@@ -1,0 +1,27 @@
+{
+	"start": true,
+	"replace": true,
+	"activity": {
+		"name": "webOS Chat profile",
+		"description": "Follow the webOS Account signing in or out on this device",
+		"type": { "background": true },
+		"trigger": {
+			"method": "palm://com.palm.db/find",
+			"params": {
+				"query": {
+					"from": "com.palm.account:1",
+					"where": [
+						{ "prop": "beingDeleted", "op": "=", "val": false },
+						{ "prop": "templateId", "op": "=", "val": "com.palm.palmprofile" }
+					]
+				},
+				"watch": true
+			},
+			"key": "fired"
+		},
+		"callback": {
+			"method": "palm://com.palm.webosarchive.chat/sync",
+			"params": { "recur": true, "profileChanged": true }
+		}
+	}
+}

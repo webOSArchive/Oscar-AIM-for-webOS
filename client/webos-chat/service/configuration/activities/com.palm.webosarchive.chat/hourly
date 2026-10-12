@@ -9,7 +9,7 @@
 		"schedule": { "interval": "1h" },
 		"callback": {
 			"method": "palm://com.palm.webosarchive.chat/sync",
-			"params": {}
+			"params": { "recur": true }
 		}
 	}
 }
