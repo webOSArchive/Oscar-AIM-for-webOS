@@ -24,7 +24,11 @@ $accounts = count($stores) === 1 ? $stores[0] : new ChainAccounts($stores);
     $get('advertise', 'oscar.webosarchive.org:5190'),
     $accounts,
     new UserData($dataDir, (int)$get('offline_max', 100), (int)$get('offline_days', 30)),
-    (bool)$get('debug', false),
+    match (strtolower((string)$get('log_level', 'normal'))) {
+        'debug' => Server::LOG_DEBUG,
+        'verbose' => Server::LOG_VERBOSE,
+        default => Server::LOG_NORMAL,
+    },
     [
         'max_conns' => $get('max_conns', null),
         'max_per_ip' => $get('max_per_ip', null),

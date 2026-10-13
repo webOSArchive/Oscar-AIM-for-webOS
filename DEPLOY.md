@@ -54,7 +54,7 @@ Set, in `/etc/oscar/config.ini`:
 | `advertise` | `oscar.webosarchive.org:5190` | The address a client is sent to for its second (BOS) connection, resolved by ordinary DNS |
 | `data_dir` | `/var/lib/oscar` | Buddy lists and offline messages, one JSON file per user |
 | `accounts` | `file` to start, `pdo` once step 6 is done | Where sign-ins are checked |
-| `debug` | `false` | `true` logs every SNAC in and out |
+| `log_level` | `normal` | `verbose` adds each session's buddy list changes, messages (sender, recipient, size, outcome; never text), away, idle and lookups; `debug` adds every SNAC in and out |
 | `max_conns`, `max_per_ip`, `signon_timeout`, `offline_max`, `offline_days` | leave unset | The limits ([README](README.md#limits)); raise `max_per_ip` only if many users share one address |
 
 With `accounts = file`, users are in `/var/lib/oscar/accounts.json`, keyed by the screen name
@@ -142,8 +142,11 @@ the other as a buddy and a message, to check presence and delivery
 
 ## Running it
 
-- **Logs:** `journalctl -u oscard`. Every connection, sign-in, refusal and drop is a line;
-  `debug = true` adds every SNAC.
+- **Logs:** `journalctl -u oscard`. Every connection, sign-in, refusal and drop is a line.
+  For troubleshooting, set `log_level = verbose` in `config.ini` and restart: each buddy added or
+  removed, each message (who to whom, its size, and delivered, stored offline or refused, and
+  why), away and back, idle, and lookups get a line too, tagged with the session and screen
+  name. `log_level = debug` adds every SNAC.
 - **Updating:** `cd /opt/oscar && sudo git pull && sudo systemctl restart oscard`. Only a
   change under `server/` or to `config.ini` needs the restart; the daemon reads both once, at
   start. A restart drops every session, and clients sign in again by themselves.

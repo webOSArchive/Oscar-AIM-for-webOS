@@ -111,7 +111,7 @@ final class Server
         private string $advertise,         // "oscar.webosarchive.org:5190", sent to clients for BOS
         private Accounts $accounts,
         private UserData $data,
-        private bool $debug = false,
+        private int $logLevel = self::LOG_NORMAL,   // LOG_NORMAL, LOG_VERBOSE or LOG_DEBUG
         array $limits = [],
     ) {
         foreach ($limits as $k => $v) if (isset($this->limits[$k]) && $v !== null) $this->limits[$k] = (int)$v;
@@ -273,7 +273,7 @@ final class Server
 
     private function snac(Conn $c, int $fam, int $sub, string $body, int $reqid = 0, int $flags = 0): void
     {
-        if ($this->debug) $this->log(sprintf("#%d -> %02x,%02x (%d bytes)", $c->id, $fam, $sub, strlen($body)));
+        if ($this->logLevel >= self::LOG_DEBUG) $this->log(sprintf("#%d -> %02x,%02x (%d bytes)", $c->id, $fam, $sub, strlen($body)));
         $this->send($c, Wire::CH_SNAC, Wire::snac($fam, $sub, $flags, $reqid, $body));
     }
 
@@ -294,7 +294,7 @@ final class Server
                 $r = new Reader($payload);
                 $fam = $r->u16(); $sub = $r->u16(); $flags = $r->u16(); $reqid = $r->u32();
                 if ($flags & 0x8000) { $r->raw($r->u16()); }     // optional SNAC TLV block
-                if ($this->debug) $this->log(sprintf("#%d <- %02x,%02x (%d bytes)", $c->id, $fam, $sub, $r->left()));
+                if ($this->logLevel >= self::LOG_DEBUG) $this->log(sprintf("#%d <- %02x,%02x (%d bytes)", $c->id, $fam, $sub, $r->left()));
                 if ($c->kind === 'auth' && $fam === 0x17) $this->auth($c, $sub, $reqid, $r);
                 elseif ($c->kind === 'bos') { if ($this->rateOk($c, $fam, $reqid)) $this->bos($c, $fam, $sub, $reqid, $r); }
                 else $this->log(sprintf("#%d SNAC %02x,%02x before sign-on, ignored", $c->id, $fam, $sub));
@@ -402,6 +402,7 @@ final class Server
                 return;
             case 0x00010011:                                     // idle time
                 $secs = $r->u32();
+                if (($secs > 0) !== ($c->idleSince > 0)) $this->vlog($c, $secs ? "idle for {$secs} s" : "no longer idle");
                 $c->idleSince = $secs ? time() - $secs : 0;
                 if ($c->ready) $this->tellWatchers($c, true);
                 return;
@@ -418,10 +419,14 @@ final class Server
                 return;
             case 0x00020004:                                     // set profile / away / caps
                 $t = $r->tlvs();
-                if ($t->has(0x0002)) { $c->profile = $t->get(0x0002); $c->profileEnc = $t->get(0x0001) ?? ''; }
+                if ($t->has(0x0002)) {
+                    $c->profile = $t->get(0x0002); $c->profileEnc = $t->get(0x0001) ?? '';
+                    $this->vlog($c, sprintf("profile set (%d bytes)", strlen($c->profile)));
+                }
                 if ($t->has(0x0005)) { $c->caps = $t->get(0x0005); }
                 if ($t->has(0x0004)) {
                     $msg = $t->get(0x0004);
+                    if (($msg === '') !== ($c->away === null)) $this->vlog($c, $msg === '' ? "back (away message cleared)" : sprintf("away (message of %d bytes)", strlen($msg)));
                     $c->away = $msg === '' ? null : $msg;
                     $c->awayEnc = $t->get(0x0003) ?? '';
                     if ($c->ready) $this->tellWatchers($c, true);
@@ -429,11 +434,15 @@ final class Server
                 return;
             case 0x00020005:                                     // user info (old form)
                 $type = $r->u16();
-                $this->sendUserInfo($c, $r->str8(), $type === 0x0003 ? 0x2 : 0x1, $reqid);
+                $who = $r->str8();
+                $this->vlog($c, "looked up '$who'");
+                $this->sendUserInfo($c, $who, $type === 0x0003 ? 0x2 : 0x1, $reqid);
                 return;
             case 0x00020015:                                     // user info
                 $flags = $r->u32();
-                $this->sendUserInfo($c, $r->str8(), $flags, $reqid);
+                $who = $r->str8();
+                $this->vlog($c, "looked up '$who'");
+                $this->sendUserInfo($c, $who, $flags, $reqid);
                 return;
             case 0x0002000B:                                     // directory info: not kept
                 return;
@@ -449,9 +458,10 @@ final class Server
                 while ($r->left() > 0) {
                     $b = Wire::normalize($r->str8());
                     if ($b === '') continue;
-                    if ($sub === 0x05) { unset($c->buddies[$b]); continue; }
-                    if (!isset($c->buddies[$b]) && count($c->buddies) >= self::MAX_FEEDBAG_ITEMS) break;
+                    if ($sub === 0x05) { unset($c->buddies[$b]); $this->vlog($c, "buddy '$b' removed (client list)"); continue; }
+                    if (!isset($c->buddies[$b]) && count($c->buddies) >= self::MAX_FEEDBAG_ITEMS) { $this->vlog($c, "buddy '$b' refused: list full"); break; }
                     $c->buddies[$b] = true;
+                    $this->vlog($c, "buddy '$b' added (client list)");
                     $o = $this->online[$b] ?? null;
                     if ($c->ready && $o && $o->ready) $this->snac($c, 0x03, 0x0B, $this->userInfo($o));
                 }
@@ -486,6 +496,7 @@ final class Server
                 return;
             case 0x00130004:
             case 0x00130005:
+                $this->vlog($c, sprintf("buddy list sent (%d items)", count($this->data->feedbag($c->nsn)['items'])));
                 $this->snac($c, 0x13, 0x06, $this->feedbagList($c), $reqid);
                 return;
             case 0x00130007:                                     // activate
@@ -513,7 +524,9 @@ final class Server
             if ($o && $o->ready) $this->snac($c, 0x03, 0x0B, $this->userInfo($o));
         }
         $this->tellWatchers($c, true);
-        foreach ($this->data->takeOffline($c->nsn) as $m) {
+        $offline = $this->data->takeOffline($c->nsn);
+        if ($offline) $this->vlog($c, sprintf("%d offline message(s) delivered", count($offline)));
+        foreach ($offline as $m) {
             $this->snac($c, 0x04, 0x07, hex2bin($m['cookie']) . pack('n', $m['channel'])
                 . $this->userInfoOffline($m['from']) . hex2bin($m['tlvs']) . (new Tlvs())->u32(0x0016, $m['time'])->encode());
         }
@@ -572,12 +585,16 @@ final class Server
         $fwd = new Tlvs();
         foreach ($t->list as [$type, $v]) if ($type !== 0x0003 && $type !== 0x0006) $fwd->add($type, $v);
 
+        // Who, to whom, how big and what became of it: never the text.
+        $about = sprintf("message to '%s' (channel %d, %d bytes)", $to, $channel, strlen($t->get(0x0002) ?? $t->get(0x0005) ?? ''));
         if ($channel === 1 && strlen($t->get(0x0002) ?? '') > self::MAX_MESSAGE + 64) {
+            $this->vlog($c, "$about refused: too long");
             $this->snac($c, 0x04, 0x01, pack('n', 0x000E), $reqid);   // incorrect SNAC format
             return;
         }
         $o = $this->online[Wire::normalize($to)] ?? null;
         if ($o && $o->ready) {
+            $this->vlog($c, "$about delivered");
             $this->snac($o, 0x04, 0x07, $cookie . pack('n', $channel) . $this->userInfo($c) . $fwd->encode());
             if ($t->has(0x0003)) $this->snac($c, 0x04, 0x0C, $cookie . pack('n', $channel) . Wire::str8($to), $reqid);
             return;
@@ -589,12 +606,15 @@ final class Server
                 'tlvs' => bin2hex($fwd->encode()), 'time' => time(),
             ]);
             if (!$kept) {
+                $this->vlog($c, "$about refused: recipient's offline queue is full");
                 $this->snac($c, 0x04, 0x01, pack('n', 0x0017), $reqid);   // server queue full
                 return;
             }
+            $this->vlog($c, "$about stored offline");
             if ($t->has(0x0003)) $this->snac($c, 0x04, 0x0C, $cookie . pack('n', $channel) . Wire::str8($to), $reqid);
             return;
         }
+        $this->vlog($c, "$about refused: recipient offline" . ($t->has(0x0006) ? " and not an account" : ", not stored (the sender didn't ask)"));
         $this->snac($c, 0x04, 0x01, pack('n', 0x0004), $reqid);        // recipient not logged in
     }
 
@@ -635,10 +655,14 @@ final class Server
             $item = ['name' => $name, 'gid' => $gid, 'bid' => $bid, 'type' => $type, 'tlvs' => bin2hex($tl)];
             $fb['items'] = array_values(array_filter($fb['items'],
                 fn($i) => !($i['gid'] === $gid && $i['bid'] === $bid)));
+            $what = self::FEEDBAG_TYPES[$type] ?? sprintf("item of type %d", $type);
+            $op = [0x08 => 'added', 0x09 => 'changed', 0x0A => 'removed'][$sub] ?? 'edited';
             if ($sub !== 0x0A && (count($fb['items']) >= self::MAX_FEEDBAG_ITEMS || strlen($tl) > self::MAX_FEEDBAG_TLVS)) {
                 $acks .= pack('n', 0x000C);                      // limit exceeded
+                $this->vlog($c, "$what '$name' refused: buddy list limit");
                 continue;
             }
+            $this->vlog($c, $name === '' ? "$what $op (group $gid, item $bid)" : "$what '$name' $op (group $gid)");
             if ($sub !== 0x0A) $fb['items'][] = $item;
             $acks .= pack('n', 0x0000);
 
@@ -707,6 +731,19 @@ final class Server
         $n = 0;
         foreach (self::RATED as $fam => $subs) foreach ($subs as $sub) { $members .= pack('nn', $fam, $sub); $n++; }
         return pack('n', 1) . $class . pack('nn', 1, $n) . $members;
+    }
+
+    public const LOG_NORMAL = 0;    // connections, sign-ins, refusals, limits
+    public const LOG_VERBOSE = 1;   // and what each session does: buddies, messages, away, idle
+    public const LOG_DEBUG = 2;     // and every SNAC in and out
+
+    private const FEEDBAG_TYPES = [0x0000 => 'buddy', 0x0001 => 'group', 0x0002 => 'permit entry',
+        0x0003 => 'deny entry', 0x0004 => 'privacy setting', 0x0005 => 'presence setting', 0x0014 => 'buddy icon'];
+
+    /** A session event, at the verbose level. Message text is never logged. */
+    private function vlog(Conn $c, string $m): void
+    {
+        if ($this->logLevel >= self::LOG_VERBOSE) $this->log("#{$c->id} '{$c->sn}' $m");
     }
 
     private function log(string $m): void
