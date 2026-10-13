@@ -1,0 +1,66 @@
+--- a/oscar.c
++++ b/oscar.c
+@@ -1440,8 +1440,13 @@
+ 				break;
+ 			}
+ 		}
+-		serv_got_alias(gc, info->bn,
+-				bn_has_formatting ? info->bn : NULL);
++		/*
++		 * webOS Chat: never clear the server alias for an unformatted (all-lowercase) name --
++		 * that undoes oscar_webos_ensure_alias() on every presence update and drops the buddy
++		 * from webOS Messaging's list again. Keep the screen name as the alias instead.
++		 */
++		serv_got_alias(gc, info->bn, info->bn);
++		(void)bn_has_formatting;
+ 	}
+ 
+ 	if (info->present & AIM_USERINFO_PRESENT_FLAGS) {
+@@ -3717,6 +3722,22 @@
+ 	oscar_set_info_and_status(account, FALSE, NULL, TRUE, status);
+ }
+ 
++/*
++ * webOS Chat: give an alias-less buddy its screen name as its SERVER alias (local only: unlike
++ * purple_blist_alias_buddy() this is not written back to the server-stored list). webOS's IM
++ * transport (imlibpurpleservice) leaves any buddy whose purple_buddy_get_alias_only() is NULL
++ * out of the buddy list it hands Messaging -- a filter meant for deleted Telegram users -- and
++ * OSCAR only sets a server alias when the server's formatting of a name differs from the stored
++ * one ("TouchPadTest" for "touchpadtest"), so an all-lowercase buddy like "curator" never
++ * appeared in Messaging at all.
++ */
++static void
++oscar_webos_ensure_alias(PurpleBuddy *b)
++{
++	if (b != NULL && purple_buddy_get_alias_only(b) == NULL)
++		purple_blist_server_alias_buddy(b, purple_buddy_get_name(b));
++}
++
+ void
+ oscar_add_buddy(PurpleConnection *gc, PurpleBuddy *buddy, PurpleGroup *group, const char *msg)
+ {
+@@ -3742,6 +3763,8 @@
+ 		return;
+ 	}
+ 
++	oscar_webos_ensure_alias(buddy);
++
+ 	if (od->ssi.received_data) {
+ 		if (!aim_ssi_itemlist_finditem(od->ssi.local, gname, bname, AIM_SSI_TYPE_BUDDY)) {
+ 			purple_debug_info("oscar",
+@@ -4069,6 +4092,7 @@
+ 								   "ssi: adding buddy %s to group %s to local list\n", curitem->name, gname);
+ 						purple_blist_add_buddy(b, NULL, g, NULL);
+ 					}
++					oscar_webos_ensure_alias(b);
+ 
+ 					/* Mobile users should always be online */
+ 					if (curitem->name[0] == '+') {
+@@ -4283,6 +4307,7 @@
+ 		purple_debug_info("oscar",
+ 				   "ssi: adding buddy %s to group %s to local list\n", name, gname_utf8 ? gname_utf8 : _("Orphans"));
+ 		purple_blist_add_buddy(b, NULL, g, NULL);
++		oscar_webos_ensure_alias(b);
+ 
+ 		/* Mobile users should always be online */
+ 		if (name[0] == '+') {

@@ -26,6 +26,11 @@ mkdir -p $OUT/obj
 SERVER=${OSCAR_SERVER:-oscar.webosarchive.org}
 OSCAR=$OUT/oscar-src
 rm -rf $OSCAR && cp -r $UPSTREAM $OSCAR
+# webOS fixes to the OSCAR code itself, applied in name order (see each patch's comment).
+for p in $HERE/patches/*.patch; do
+    [ -f "$p" ] || continue
+    patch -s -p1 -d $OSCAR < "$p" || { echo "patch failed: $p" >&2; exit 1; }
+done
 sed -i -e "s|#define AIM_DEFAULT_LOGIN_SERVER \"login.oscar.aol.com\"|#define AIM_DEFAULT_LOGIN_SERVER \"$SERVER\"|" \
        -e "s|#define AIM_DEFAULT_SSL_LOGIN_SERVER \"slogin.oscar.aol.com\"|#define AIM_DEFAULT_SSL_LOGIN_SERVER \"$SERVER\"|" \
        -e "s|#define OSCAR_DEFAULT_LOGIN OSCAR_CLIENT_LOGIN|#define OSCAR_DEFAULT_LOGIN OSCAR_MD5_LOGIN|" \
