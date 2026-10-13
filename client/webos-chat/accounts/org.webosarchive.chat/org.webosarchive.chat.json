@@ -31,6 +31,7 @@
 			},
 			"implementation": "palm://com.palm.imlibpurple/",
 			"onEnabled": "palm://com.palm.imlibpurple/onEnabled",
+			"onDelete": "palm://com.palm.imlibpurple/onDelete",
 			"readOnlyData": true,
 			"serviceName": "type_aim",
 			"dbkinds": {
