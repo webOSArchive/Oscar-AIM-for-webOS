@@ -58,7 +58,7 @@ final class Server
 {
     /** @var array<int, Conn> */
     private array $conns = [];
-    /** @var array<string, Conn> online BOS sessions by normalized screen name */
+    /** @var array<string, array<int, Conn>> online BOS sessions by normalized screen name, then id */
     private array $online = [];
     /** @var array<string, array{sn:string, until:float}> sign-on cookies by hex */
     private array $cookies = [];
@@ -104,6 +104,7 @@ final class Server
         'max_conns' => 900,                // every open connection
         'max_per_ip' => 16,                // from one address
         'signon_timeout' => 30,            // seconds a connection has to reach its BOS session
+        'max_sessions' => 4,               // BOS sessions per screen name; past it the oldest is signed off
     ];
 
     public function __construct(
@@ -116,6 +117,7 @@ final class Server
     ) {
         foreach ($limits as $k => $v) if (isset($this->limits[$k]) && $v !== null) $this->limits[$k] = (int)$v;
         $this->limits['max_conns'] = max(1, min(1000, $this->limits['max_conns']));
+        $this->limits['max_sessions'] = max(1, $this->limits['max_sessions']);
     }
 
     public function run(): void
@@ -223,9 +225,10 @@ final class Server
         if (--$this->perIp[$c->ip] <= 0) unset($this->perIp[$c->ip]);
         @fclose($c->sock);
         $this->log("#{$c->id} {$c->sn} dropped: $why");
-        if ($c->kind === 'bos' && ($this->online[$c->nsn] ?? null) === $c) {
-            unset($this->online[$c->nsn]);
-            if ($c->ready) $this->tellWatchers($c, false);
+        if ($c->kind === 'bos' && isset($this->online[$c->nsn][$c->id])) {
+            unset($this->online[$c->nsn][$c->id]);
+            if (!$this->online[$c->nsn]) unset($this->online[$c->nsn]);
+            if ($c->ready) $this->tellWatchers($c);
         }
     }
 
@@ -361,18 +364,22 @@ final class Server
         $c->nsn = Wire::normalize($c->sn);
         $c->signon = time();
 
-        // One session per screen name: the older one is told it signed on elsewhere.
-        $old = $this->online[$c->nsn] ?? null;
-        if ($old && $old !== $c) {
+        // A screen name may be signed on in several places at once; each gets what is sent to
+        // it. Past max_sessions the oldest is told it signed on elsewhere.
+        $this->online[$c->nsn][$c->id] = $c;
+        while (count($this->online[$c->nsn]) > $this->limits['max_sessions']) {
+            $old = reset($this->online[$c->nsn]);
+            unset($this->online[$c->nsn][$old->id]);
             $this->send($old, Wire::CH_SIGNOFF, (new Tlvs())->u16(0x0009, 0x0001)->encode());
             $old->closing = true;
             $old->ready = false;
+            $this->log("#{$old->id} '{$old->sn}' signed off: too many sessions");
         }
-        $this->online[$c->nsn] = $c;
         $c->buddies = array_fill_keys($this->data->buddiesOf($c->nsn), true);
 
         $this->snac($c, 0x01, 0x03, pack('n*', ...self::FAMILIES));
-        $this->log("#{$c->id} BOS session for '{$c->sn}'");
+        $n = count($this->online[$c->nsn]);
+        $this->log("#{$c->id} BOS session for '{$c->sn}'" . ($n > 1 ? " ($n sessions)" : ''));
     }
 
     private function bos(Conn $c, int $fam, int $sub, int $reqid, Reader $r): void
@@ -404,7 +411,7 @@ final class Server
                 $secs = $r->u32();
                 if (($secs > 0) !== ($c->idleSince > 0)) $this->vlog($c, $secs ? "idle for {$secs} s" : "no longer idle");
                 $c->idleSince = $secs ? time() - $secs : 0;
-                if ($c->ready) $this->tellWatchers($c, true);
+                if ($c->ready) $this->tellWatchers($c);
                 return;
             case 0x00010002:                                     // client ready
                 $this->clientReady($c);
@@ -429,7 +436,7 @@ final class Server
                     if (($msg === '') !== ($c->away === null)) $this->vlog($c, $msg === '' ? "back (away message cleared)" : sprintf("away (message of %d bytes)", strlen($msg)));
                     $c->away = $msg === '' ? null : $msg;
                     $c->awayEnc = $t->get(0x0003) ?? '';
-                    if ($c->ready) $this->tellWatchers($c, true);
+                    if ($c->ready) $this->tellWatchers($c);
                 }
                 return;
             case 0x00020005:                                     // user info (old form)
@@ -462,8 +469,8 @@ final class Server
                     if (!isset($c->buddies[$b]) && count($c->buddies) >= self::MAX_FEEDBAG_ITEMS) { $this->vlog($c, "buddy '$b' refused: list full"); break; }
                     $c->buddies[$b] = true;
                     $this->vlog($c, "buddy '$b' added (client list)");
-                    $o = $this->online[$b] ?? null;
-                    if ($c->ready && $o && $o->ready) $this->snac($c, 0x03, 0x0B, $this->userInfo($o));
+                    $o = $this->presence($b);
+                    if ($c->ready && $o) $this->snac($c, 0x03, 0x0B, $this->userInfo($o));
                 }
                 return;
 
@@ -520,10 +527,10 @@ final class Server
         if ($c->ready) return;
         $c->ready = true;
         foreach (array_keys($c->buddies) as $b) {
-            $o = $this->online[$b] ?? null;
-            if ($o && $o->ready) $this->snac($c, 0x03, 0x0B, $this->userInfo($o));
+            $o = $this->presence($b);
+            if ($o) $this->snac($c, 0x03, 0x0B, $this->userInfo($o));
         }
-        $this->tellWatchers($c, true);
+        $this->tellWatchers($c);
         $offline = $this->data->takeOffline($c->nsn);
         if ($offline) $this->vlog($c, sprintf("%d offline message(s) delivered", count($offline)));
         foreach ($offline as $m) {
@@ -533,12 +540,34 @@ final class Server
         $this->log("#{$c->id} '{$c->sn}' is online (" . count($this->online) . " online)");
     }
 
-    /** Tells everyone who has $c as a buddy that it came, changed, or went. */
-    private function tellWatchers(Conn $c, bool $on): void
+    /** The ready sessions of a screen name. @return Conn[] */
+    private function sessions(string $nsn): array
     {
-        foreach ($this->online as $o) {
-            if ($o === $c || !$o->ready || !isset($o->buddies[$c->nsn])) continue;
-            if ($on) $this->snac($o, 0x03, 0x0B, $this->userInfo($c));
+        return array_filter($this->online[$nsn] ?? [], fn($o) => $o->ready);
+    }
+
+    /**
+     * The ready session that speaks for a screen name to everyone else: one that isn't away
+     * over one that is, then the least idle, then the newest. Null when it isn't online.
+     */
+    private function presence(string $nsn): ?Conn
+    {
+        $rank = fn(Conn $o) => [$o->away === null, $o->idleSince ?: PHP_INT_MAX, $o->id];
+        $best = null;
+        foreach ($this->sessions($nsn) as $o) if (!$best || $rank($o) > $rank($best)) $best = $o;
+        return $best;
+    }
+
+    /**
+     * Tells everyone who has $c's screen name as a buddy how it now looks after $c came,
+     * changed, or went: online as the session that speaks for it, or gone with its last one.
+     */
+    private function tellWatchers(Conn $c): void
+    {
+        $u = $this->presence($c->nsn);
+        foreach ($this->online as $list) foreach ($list as $o) {
+            if (!$o->ready || !isset($o->buddies[$c->nsn]) || $o->nsn === $c->nsn) continue;
+            if ($u) $this->snac($o, 0x03, 0x0B, $this->userInfo($u));
             else $this->snac($o, 0x03, 0x0C, Wire::str8($c->sn) . pack('nn', 0, 0));
         }
     }
@@ -547,7 +576,9 @@ final class Server
     private function userInfo(Conn $u): string
     {
         $class = 0x0010 | ($u->away !== null ? 0x0020 : 0);   // AIM user, away
-        $t = (new Tlvs())->u16(0x0001, $class)->u32(0x0003, $u->signon)->u32(0x0005, $u->signon);
+        // Online since the first of its sessions, so another sign-in isn't a new arrival.
+        $since = min([$u->signon, ...array_map(fn($o) => $o->signon, $this->sessions($u->nsn))]);
+        $t = (new Tlvs())->u16(0x0001, $class)->u32(0x0003, $since)->u32(0x0005, $since);
         if ($u->idleSince) $t->u16(0x0004, intdiv(time() - $u->idleSince, 60));
         if ($u->caps !== '') $t->add(0x000D, $u->caps);
         return Wire::str8($u->sn) . pack('n', 0) . $t->encodeCounted();
@@ -560,13 +591,17 @@ final class Server
 
     private function sendUserInfo(Conn $c, string $who, int $flags, int $reqid): void
     {
-        $o = $this->online[Wire::normalize($who)] ?? null;
-        if (!$o || !$o->ready) {
+        $nsn = Wire::normalize($who);
+        $o = $this->presence($nsn);
+        if (!$o) {
             $this->snac($c, 0x02, 0x01, pack('n', 0x0004), $reqid);   // not logged in
             return;
         }
+        // The profile from the session that has one, should the one speaking not.
+        $p = $o;
+        if ($p->profile === '') foreach ($this->sessions($nsn) as $s) if ($s->profile !== '') { $p = $s; break; }
         $t = new Tlvs();
-        if ($flags & 0x1) $t->add(0x0001, $o->profileEnc ?: 'text/aolrtf; charset="us-ascii"')->add(0x0002, $o->profile);
+        if ($flags & 0x1) $t->add(0x0001, $p->profileEnc ?: 'text/aolrtf; charset="us-ascii"')->add(0x0002, $p->profile);
         if (($flags & 0x2) && $o->away !== null) $t->add(0x0003, $o->awayEnc ?: 'text/aolrtf; charset="us-ascii"')->add(0x0004, $o->away);
         if ($flags & 0x4) $t->add(0x0005, $o->caps);
         $this->snac($c, 0x02, 0x06, $this->userInfo($o) . $t->encode(), $reqid);
@@ -592,10 +627,11 @@ final class Server
             $this->snac($c, 0x04, 0x01, pack('n', 0x000E), $reqid);   // incorrect SNAC format
             return;
         }
-        $o = $this->online[Wire::normalize($to)] ?? null;
-        if ($o && $o->ready) {
-            $this->vlog($c, "$about delivered");
-            $this->snac($o, 0x04, 0x07, $cookie . pack('n', $channel) . $this->userInfo($c) . $fwd->encode());
+        $all = $this->sessions(Wire::normalize($to));
+        if ($all) {
+            $this->vlog($c, "$about delivered" . (count($all) > 1 ? " to " . count($all) . " sessions" : ''));
+            $msg = $cookie . pack('n', $channel) . $this->userInfo($c) . $fwd->encode();
+            foreach ($all as $o) $this->snac($o, 0x04, 0x07, $msg);
             if ($t->has(0x0003)) $this->snac($c, 0x04, 0x0C, $cookie . pack('n', $channel) . Wire::str8($to), $reqid);
             return;
         }
@@ -624,8 +660,8 @@ final class Server
         $channel = $r->u16();
         $to = $r->str8();
         $event = $r->u16();
-        $o = $this->online[Wire::normalize($to)] ?? null;
-        if ($o && $o->ready) $this->snac($o, 0x04, 0x14, $cookie . pack('n', $channel) . Wire::str8($c->sn) . pack('n', $event));
+        foreach ($this->sessions(Wire::normalize($to)) as $o)
+            $this->snac($o, 0x04, 0x14, $cookie . pack('n', $channel) . Wire::str8($c->sn) . pack('n', $event));
     }
 
     // ---- feedbag ----
@@ -647,7 +683,9 @@ final class Server
     private function feedbagEdit(Conn $c, int $sub, Reader $r, int $reqid): void
     {
         $fb = $this->data->feedbag($c->nsn);
-        $acks = '';
+        $acks = $done = '';
+        // The user's other sessions see the edit too, as AOL's servers sent it to them.
+        $others = array_filter($this->sessions($c->nsn), fn($o) => $o !== $c);
         while ($r->left() >= 10) {
             $name = $r->str16();
             $gid = $r->u16(); $bid = $r->u16(); $type = $r->u16();
@@ -665,20 +703,22 @@ final class Server
             $this->vlog($c, $name === '' ? "$what $op (group $gid, item $bid)" : "$what '$name' $op (group $gid)");
             if ($sub !== 0x0A) $fb['items'][] = $item;
             $acks .= pack('n', 0x0000);
+            $done .= $this->encodeItem($item);
 
             if ($type === 0x0000 && $name !== '') {
                 $b = Wire::normalize($name);
-                if ($sub === 0x0A) {
-                    unset($c->buddies[$b]);
-                } else {
-                    $c->buddies[$b] = true;
-                    $o = $this->online[$b] ?? null;
-                    if ($sub === 0x08 && $o && $o->ready) $this->snac($c, 0x03, 0x0B, $this->userInfo($o));
+                $o = $this->presence($b);
+                foreach ([$c, ...$others] as $s) {
+                    if ($sub === 0x0A) { unset($s->buddies[$b]); continue; }
+                    $known = isset($s->buddies[$b]);
+                    $s->buddies[$b] = true;
+                    if ($o && ($sub === 0x08 || !$known)) $this->snac($s, 0x03, 0x0B, $this->userInfo($o));
                 }
             }
         }
         $this->data->saveFeedbag($c->nsn, $fb);
         $this->snac($c, 0x13, 0x0E, $acks, $reqid);
+        if ($done !== '') foreach ($others as $s) $this->snac($s, 0x13, $sub, $done);
     }
 
     /** Every SNAC a client sends, so each has a rate class (libpurple 2.5.1 warns of any without). */

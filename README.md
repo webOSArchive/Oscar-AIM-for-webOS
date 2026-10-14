@@ -49,7 +49,10 @@ come online, and receive each other's messages; a wrong key is refused ("Incorre
 
 `test/limits.php` checks the server's limits against a daemon started with small ones (its
 header has the command). Measured 2026-10-12: all nine checks pass, and two libpurple clients
-still sign in and chat on the same server with the default limits.
+still sign in and chat on the same server with the default limits. Measured 2026-10-14: the
+checks for two sessions of one screen name pass too, and two libpurple 2.14 clients signed on
+as the same name both stay on, both receive its messages, and a buddy added on one shows on the
+other.
 
 ## What the server does
 
@@ -62,6 +65,10 @@ still sign in and chat on the same server with the default limits.
 | 0x04 ICBM | Parameters, messages (channels 1 and 2 forwarded), delivery acks, typing, offline messages delivered at sign-on |
 | 0x09 privacy | Rights |
 | 0x13 feedbag | Rights, the stored list, add, modify, delete |
+
+A screen name can be signed on in several places at once, as with AOL's later servers: each
+session gets its messages and typing notifications, an edit to the buddy list is sent to the
+others, and buddies see it online, available if any session is, until its last session ends.
 
 ### Limits
 
@@ -81,6 +88,8 @@ What one client can make the server hold is bounded, so it can run for months un
   edit is answered "limit exceeded".
 - **Connections.** At most `max_conns` (900, kept under PHP `stream_select`'s 1,024) and
   `max_per_ip` (16) at once; a connection gets `signon_timeout` (30 s) to reach its session.
+  A screen name has at most `max_sessions` (4) sessions; one more signs the oldest off
+  ("signed on elsewhere").
   Connections over a limit are closed at once, and counted in the log once a minute.
 
 Not yet: buddy icons (0x10), chat rooms (0x0D, 0x0E), the permit and deny lists' effect on

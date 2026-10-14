@@ -3,7 +3,7 @@
  * Checks the server's limits against a running oscard started with small ones:
  *
  *   OSCAR_LISTEN=127.0.0.1:5199 OSCAR_ADVERTISE=127.0.0.1:5199 OSCAR_DATA_DIR=<dir>
- *   OSCAR_MAX_PER_IP=4 OSCAR_SIGNON_TIMEOUT=3 OSCAR_OFFLINE_MAX=3 php server/bin/oscard
+ *   OSCAR_MAX_PER_IP=4 OSCAR_SIGNON_TIMEOUT=3 OSCAR_OFFLINE_MAX=3 OSCAR_MAX_SESSIONS=2 php server/bin/oscard
  *
  * with alice and bob in <dir>/accounts.json, both with the pass phrase "maple river lamp".
  * Run: php test/limits.php 127.0.0.1:5199
@@ -184,6 +184,34 @@ for ($i = 0; $i < 12; $i++) {
 }
 while ($s = $carol->snac(1)) if ($s[1] === 0x01) $bad++;
 check($bad === 0, "a SNAC every 0.3 s for 12: $bad refused");
+
+// 6. bob is now signed on twice ($bob and $carol): neither signs the other off, both get
+// his messages, and he stays online to his watchers until the last session ends.
+while ($bob->snac(0.5));
+while ($carol->snac(0.5));
+check(!$bob->closed(1), "bob's first session stays open beside the second");
+$alice = signIn($addr, 'alice');
+$alice->sendSnac(0x03, 0x04, Wire::str8('bob'), 40);
+while ($alice->snac(1));
+$alice->sendSnac(0x04, 0x06, im('bob', 'to both', false), 41);
+$got = 0;
+foreach ([$bob, $carol] as $c) while ($s = $c->snac(1)) if ($s[0] === 0x04 && $s[1] === 0x07) $got++;
+check($got === 2, "a message to bob reaches $got of his 2 sessions");
+
+// 7. A third session is one past max_sessions: the oldest is told it signed on elsewhere.
+$dave = signIn($addr, 'bob');
+$f = $bob->frame(2);
+check($f && $f[0] === Wire::CH_SIGNOFF && (new Reader($f[1]))->tlvs()->get(0x0009) === pack('n', 1),
+    "past max_sessions the oldest session is signed off as signed on elsewhere");
+check($bob->closed(2), "and closed");
+fclose($carol->s);
+$gone = $still = false;
+while ($s = $alice->snac(1)) { if ($s[0] === 0x03 && $s[1] === 0x0C) $gone = true; if ($s[0] === 0x03 && $s[1] === 0x0B) $still = true; }
+check(!$gone && $still, "bob ending one session leaves him online");
+fclose($dave->s);
+$gone = false;
+while ($s = $alice->snac(1)) if ($s[0] === 0x03 && $s[1] === 0x0C) $gone = true;
+check($gone, "bob ending his last session signs him off");
 
 echo $fails ? "$fails failed\n" : "all passed\n";
 exit($fails ? 1 : 0);

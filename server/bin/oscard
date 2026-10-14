@@ -33,5 +33,6 @@ $accounts = count($stores) === 1 ? $stores[0] : new ChainAccounts($stores);
         'max_conns' => $get('max_conns', null),
         'max_per_ip' => $get('max_per_ip', null),
         'signon_timeout' => $get('signon_timeout', null),
+        'max_sessions' => $get('max_sessions', null),
     ],
 ))->run();

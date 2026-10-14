@@ -55,7 +55,7 @@ Set, in `/etc/oscar/config.ini`:
 | `data_dir` | `/var/lib/oscar` | Buddy lists and offline messages, one JSON file per user |
 | `accounts` | `file` to start, `pdo` once step 6 is done | Where sign-ins are checked |
 | `log_level` | `normal` | `verbose` adds each session's buddy list changes, messages (sender, recipient, size, outcome; never text), away, idle and lookups; `debug` adds every SNAC in and out |
-| `max_conns`, `max_per_ip`, `signon_timeout`, `offline_max`, `offline_days` | leave unset | The limits ([README](README.md#limits)); raise `max_per_ip` only if many users share one address |
+| `max_conns`, `max_per_ip`, `signon_timeout`, `max_sessions`, `offline_max`, `offline_days` | leave unset | The limits ([README](README.md#limits)); raise `max_per_ip` only if many users share one address |
 
 With `accounts = file`, users are in `/var/lib/oscar/accounts.json`, keyed by the screen name
 with case and spaces removed:
