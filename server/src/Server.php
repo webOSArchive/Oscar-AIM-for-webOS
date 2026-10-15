@@ -21,6 +21,7 @@ final class Conn
     public int $seq;
     public string $kind = 'new';          // new | auth | bos
     public float $lastHeard;
+    public float $lastSent;
     public float $opened;
     public bool $closing = false;          // close once $out is flushed
 
@@ -50,7 +51,7 @@ final class Conn
     public function __construct(public $sock, public int $id, public string $peer, public string $ip)
     {
         $this->seq = random_int(0, 0x7fff);
-        $this->lastHeard = $this->opened = microtime(true);
+        $this->lastHeard = $this->lastSent = $this->opened = microtime(true);
     }
 }
 
@@ -70,8 +71,14 @@ final class Server
     private float $lastRefusedLog = 0;
     private float $lastSelectFail = 0;
     private float $lastSweep = 0;
+    /** @var array<string, float> when screen names lost their last session other than by signing off */
+    private array $gone = [];
 
-    private const IDLE_TIMEOUT = 300;      // seconds without a frame, keepalives included
+    /**
+     * Seconds after losing its last session that a screen name is taken as on its way back:
+     * a message to it is kept and delivered when it is, whether or not the sender asked.
+     */
+    private const RECONNECT_GRACE = 120;
     private const FAMILIES = [0x0001, 0x0002, 0x0003, 0x0004, 0x0009, 0x0013];
 
     /**
@@ -105,6 +112,11 @@ final class Server
         'max_per_ip' => 16,                // from one address
         'signon_timeout' => 30,            // seconds a connection has to reach its BOS session
         'max_sessions' => 4,               // BOS sessions per screen name; past it the oldest is signed off
+        // Seconds without a frame from a client before it is dropped. Some clients (webOS devices
+        // among them) send nothing for minutes while awake, so this is long; dead connections are
+        // found sooner by the keepalives, which TCP gives up on when nothing acknowledges them.
+        'idle_timeout' => 1800,
+        'keepalive' => 60,                 // seconds of quiet before the server sends a session a keepalive
     ];
 
     public function __construct(
@@ -230,6 +242,10 @@ final class Server
             unset($this->online[$c->nsn][$c->id]);
             if (!$this->online[$c->nsn]) unset($this->online[$c->nsn]);
             if ($c->ready) $this->tellWatchers($c);
+            if (!isset($this->online[$c->nsn])) {
+                if ($why === 'signed off') unset($this->gone[$c->nsn]);
+                else $this->gone[$c->nsn] = microtime(true);
+            }
         }
     }
 
@@ -237,8 +253,12 @@ final class Server
     {
         $now = microtime(true);
         foreach ($this->conns as $c) {
-            if ($now - $c->lastHeard > self::IDLE_TIMEOUT) $this->drop($c, 'silent too long');
+            if ($now - $c->lastHeard > $this->limits['idle_timeout']) $this->drop($c, 'silent too long');
             elseif ($c->kind !== 'bos' && $now - $c->opened > $this->limits['signon_timeout']) $this->drop($c, 'no sign-on in time');
+            elseif ($c->kind === 'bos' && $now - $c->lastSent > $this->limits['keepalive']) $this->send($c, Wire::CH_KEEPALIVE, '');
+        }
+        foreach ($this->gone as $n => $t) {
+            if ($now - $t > self::RECONNECT_GRACE) unset($this->gone[$n]);
         }
         foreach ($this->cookies as $k => $v) {
             if ($v['until'] < $now) unset($this->cookies[$k]);
@@ -271,6 +291,7 @@ final class Server
     private function send(Conn $c, int $channel, string $data): void
     {
         $c->out .= Wire::flap($channel, $c->seq++, $data);
+        $c->lastSent = microtime(true);
         $c->seq &= 0xffff;
         if (strlen($c->out) > self::MAX_UNREAD) $this->drop($c, 'not reading');
     }
@@ -658,9 +679,13 @@ final class Server
             if ($t->has(0x0003)) $this->snac($c, 0x04, 0x0C, $cookie . pack('n', $channel) . Wire::str8($to), $reqid);
             return;
         }
-        // Kept for a screen name that is an account, up to UserData's limits.
-        if ($channel === 1 && $t->has(0x0006) && $this->accounts->exists($to)) {
-            $kept = $this->data->queueOffline(Wire::normalize($to), [
+        // Kept for a screen name that is an account, up to UserData's limits: when the sender
+        // asks, or when the recipient's connection went within RECONNECT_GRACE and it is
+        // likely signing back in.
+        $nto = Wire::normalize($to);
+        $since = isset($this->gone[$nto]) ? (int)(microtime(true) - $this->gone[$nto]) : null;
+        if ($channel === 1 && ($t->has(0x0006) || $since !== null) && $this->accounts->exists($to)) {
+            $kept = $this->data->queueOffline($nto, [
                 'from' => $c->sn, 'cookie' => bin2hex($cookie), 'channel' => $channel,
                 'tlvs' => bin2hex($fwd->encode()), 'time' => time(),
             ]);
@@ -669,7 +694,7 @@ final class Server
                 $this->snac($c, 0x04, 0x01, pack('n', 0x0017), $reqid);   // server queue full
                 return;
             }
-            $this->vlog($c, "$about stored offline");
+            $this->vlog($c, "$about stored offline" . ($t->has(0x0006) ? '' : " (recipient's connection went $since s ago)"));
             if ($t->has(0x0003)) $this->snac($c, 0x04, 0x0C, $cookie . pack('n', $channel) . Wire::str8($to), $reqid);
             return;
         }
