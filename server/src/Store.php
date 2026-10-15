@@ -9,7 +9,8 @@
  * ChainAccounts asks several stores in turn, so test accounts can stay in the file.
  *
  * UserData keeps what the server holds for each screen name: the buddy list (feedbag),
- * and messages waiting for a user who was offline. It is files under data/, one per user.
+ * and messages waiting for a user who was offline. It is files under data/, one per user,
+ * and roster.json, everyone who has signed on (for auto_buddies).
  */
 
 interface Accounts
@@ -195,6 +196,88 @@ final class UserData
             if ($it['type'] === 0x0000 && $it['name'] !== '') $out[Wire::normalize($it['name'])] = true;
         }
         return array_keys($out);
+    }
+
+    /** Everyone who has signed on since the roster was started: normalized name => display form. */
+    public function roster(): array
+    {
+        $f = "{$this->dir}/roster.json";
+        return is_file($f) ? (json_decode(file_get_contents($f), true) ?: []) : [];
+    }
+
+    /** Adds $sn to the roster. Returns everyone already in it when $sn is new, null when it isn't. */
+    public function joinRoster(string $sn): ?array
+    {
+        $all = $this->roster();
+        $n = Wire::normalize($sn);
+        if (isset($all[$n])) return null;
+        $others = $all;
+        $all[$n] = $sn;
+        $this->write("{$this->dir}/roster.json", $all);
+        return $others;
+    }
+
+    /**
+     * Puts $buddy on $sn's buddy list, unless it is already there: in the group "Buddies", or
+     * the first group if there is no such one, or a new "Buddies". Returns the edits for $sn's
+     * sessions, as [subtype, item] in the order to send them: adds (13,08), then the groups
+     * whose member lists (TLV 0xC8) changed (13,09).
+     */
+    public function addBuddy(string $sn, string $buddy): array
+    {
+        $fb = $this->feedbag($sn);
+        $items = $fb['items'];
+        $nb = Wire::normalize($buddy);
+        $root = $group = null;
+        $gids = $bids = [];
+        foreach ($items as $i => $it) {
+            if ($it['type'] === 0x0000 && Wire::normalize($it['name']) === $nb) return [];
+            $gids[$it['gid']] = $bids[$it['bid']] = true;
+            if ($it['type'] !== 0x0001 || $it['bid'] !== 0) continue;
+            if ($it['gid'] === 0) $root = $i;
+            elseif ($group === null || ($it['name'] === self::GROUP && $items[$group]['name'] !== self::GROUP)) $group = $i;
+        }
+        $adds = $changed = [];
+        if ($root === null) {
+            $items[] = ['name' => '', 'gid' => 0, 'bid' => 0, 'type' => 0x0001, 'tlvs' => ''];
+            $root = array_key_last($items);
+            $adds[] = $root;
+        }
+        if ($group === null) {
+            for ($gid = 1; isset($gids[$gid]); $gid++);
+            $items[] = ['name' => self::GROUP, 'gid' => $gid, 'bid' => 0, 'type' => 0x0001, 'tlvs' => ''];
+            $group = array_key_last($items);
+            $adds[] = $group;
+            $items[$root]['tlvs'] = self::withMember($items[$root]['tlvs'], $gid);
+            $changed[] = $root;
+        }
+        for ($bid = 1; isset($bids[$bid]); $bid++);
+        $gid = $items[$group]['gid'];
+        $items[] = ['name' => $buddy, 'gid' => $gid, 'bid' => $bid, 'type' => 0x0000, 'tlvs' => ''];
+        $adds[] = array_key_last($items);
+        $items[$group]['tlvs'] = self::withMember($items[$group]['tlvs'], $bid);
+        array_unshift($changed, $group);
+
+        $fb['items'] = $items;
+        $this->saveFeedbag($sn, $fb);
+        $edits = [];
+        foreach ($adds as $i) $edits[] = [0x08, $items[$i]];
+        foreach ($changed as $i) if (!in_array($i, $adds, true)) $edits[] = [0x09, $items[$i]];
+        return $edits;
+    }
+
+    private const GROUP = 'Buddies';
+
+    /** A group's TLVs (hex) with $id added to its member list, TLV 0xC8. */
+    private static function withMember(string $tlvs, int $id): string
+    {
+        $out = new Tlvs();
+        $members = '';
+        foreach ((new Reader(hex2bin($tlvs)))->tlvs()->list as [$type, $v]) {
+            if ($type === 0x00C8) $members = $v;
+            else $out->add($type, $v);
+        }
+        return bin2hex($out->add(0x00C8, $members . pack('n', $id))->encode());
     }
 
     /** Keeps a message for $to; false when $to already has as many as are kept. */

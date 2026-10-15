@@ -114,6 +114,7 @@ final class Server
         private UserData $data,
         private int $logLevel = self::LOG_NORMAL,   // LOG_NORMAL, LOG_VERBOSE or LOG_DEBUG
         array $limits = [],
+        private bool $autoBuddies = false, // everyone who signs on is a buddy of everyone else
     ) {
         foreach ($limits as $k => $v) if (isset($this->limits[$k]) && $v !== null) $this->limits[$k] = (int)$v;
         $this->limits['max_conns'] = max(1, min(1000, $this->limits['max_conns']));
@@ -375,6 +376,7 @@ final class Server
             $old->ready = false;
             $this->log("#{$old->id} '{$old->sn}' signed off: too many sessions");
         }
+        if ($this->autoBuddies) $this->befriend($c);
         $c->buddies = array_fill_keys($this->data->buddiesOf($c->nsn), true);
 
         $this->snac($c, 0x01, 0x03, pack('n*', ...self::FAMILIES));
@@ -518,6 +520,27 @@ final class Server
                 return;
         }
         $this->log(sprintf("#%d %s SNAC %02x,%02x ignored", $c->id, $c->sn, $fam, $sub));
+    }
+
+    /**
+     * auto_buddies: a screen name's first sign-on puts it on the buddy list of everyone who has
+     * signed on before, and them on its own. Once only, so a buddy taken off a list stays off.
+     * Their sessions get the edits as they would from another session of their own.
+     */
+    private function befriend(Conn $c): void
+    {
+        $others = $this->data->joinRoster($c->sn);
+        if ($others === null) return;
+        foreach ($others as $nsn => $sn) {
+            $this->data->addBuddy($c->nsn, $sn);
+            $edits = $this->data->addBuddy($nsn, $c->sn);
+            if (!$edits) continue;
+            foreach ($this->sessions($nsn) as $o) {
+                foreach ($edits as [$sub, $item]) $this->snac($o, 0x13, $sub, $this->encodeItem($item));
+                $o->buddies[$c->nsn] = true;
+            }
+        }
+        $this->log("#{$c->id} '{$c->sn}' signed on for the first time: buddies with " . count($others) . " others");
     }
 
     // ---- sign-on and presence ----
