@@ -18,7 +18,9 @@ final class Client
 
     public function __construct(string $addr)
     {
-        $this->s = stream_socket_client("tcp://$addr", $e, $es, 5);
+        // Without Nagle, so what is sent goes at once even while earlier bytes are unacknowledged.
+        $this->s = stream_socket_client("tcp://$addr", $e, $es, 5, STREAM_CLIENT_CONNECT,
+            stream_context_create(['socket' => ['tcp_nodelay' => true]]));
         if (!$this->s) throw new RuntimeException("connect: $es");
     }
 

@@ -36,6 +36,7 @@ $accounts = count($stores) === 1 ? $stores[0] : new ChainAccounts($stores);
         'max_sessions' => $get('max_sessions', null),
         'idle_timeout' => $get('idle_timeout', null),
         'keepalive' => $get('keepalive', null),
+        'delivery_timeout' => $get('delivery_timeout', null),
     ],
     filter_var($get('auto_buddies', true), FILTER_VALIDATE_BOOL),
 ))->run();

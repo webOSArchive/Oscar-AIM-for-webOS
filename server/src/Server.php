@@ -22,6 +22,11 @@ final class Conn
     public string $kind = 'new';          // new | auth | bos
     public float $lastHeard;
     public float $lastSent;
+    public int $queued = 0;                // bytes put in $out, ever
+    public int $written = 0;               // bytes written to the socket, ever
+    public string $tcpKey = '';            // its addresses as /proc/net/tcp writes them
+    /** @var array<int, array{rec: array, sent: float, end: int}> messages handed over, not yet known to have arrived */
+    public array $unsure = [];
     public float $opened;
     public bool $closing = false;          // close once $out is flushed
 
@@ -71,14 +76,9 @@ final class Server
     private float $lastRefusedLog = 0;
     private float $lastSelectFail = 0;
     private float $lastSweep = 0;
-    /** @var array<string, float> when screen names lost their last session other than by signing off */
-    private array $gone = [];
-
-    /**
-     * Seconds after losing its last session that a screen name is taken as on its way back:
-     * a message to it is kept and delivered when it is, whether or not the sender asked.
-     */
-    private const RECONNECT_GRACE = 120;
+    /** Whether connections get TCP_USER_TIMEOUT, so a message can be known to have arrived. */
+    private bool $redeliver = false;
+    private float $lastAckCheck = 0;
     private const FAMILIES = [0x0001, 0x0002, 0x0003, 0x0004, 0x0009, 0x0013];
 
     /**
@@ -117,6 +117,10 @@ final class Server
         // found sooner by the keepalives, which TCP gives up on when nothing acknowledges them.
         'idle_timeout' => 1800,
         'keepalive' => 60,                 // seconds of quiet before the server sends a session a keepalive
+        // Seconds the device's TCP has to acknowledge what was sent before the connection is
+        // given up (TCP_USER_TIMEOUT). Messages sent to a connection in that time before it went
+        // are kept and delivered again at the next sign-on; 0 turns that off.
+        'delivery_timeout' => 60,
     ];
 
     public function __construct(
@@ -135,6 +139,9 @@ final class Server
 
     public function run(): void
     {
+        $this->redeliver = $this->limits['delivery_timeout'] > 0 && function_exists('socket_import_stream');
+        if ($this->limits['delivery_timeout'] > 0 && !$this->redeliver)
+            $this->log("WARNING: PHP's sockets extension is missing: messages sent to a connection that dies are lost");
         foreach ($this->listen as $addr) {
             $s = @stream_socket_server("tcp://$addr", $errno, $errstr);
             if (!$s) throw new RuntimeException("can't listen on $addr: $errstr");
@@ -189,7 +196,17 @@ final class Server
             return;
         }
         stream_set_blocking($sock, false);
+        if ($this->redeliver) {
+            // What the device's TCP hasn't acknowledged in delivery_timeout ends the connection,
+            // so anything sent more than that before it went is known to have arrived.
+            $s = socket_import_stream($sock);
+            if (!$s || !socket_set_option($s, SOL_TCP, self::TCP_USER_TIMEOUT, $this->limits['delivery_timeout'] * 1000)) {
+                $this->redeliver = false;
+                $this->log("WARNING: TCP_USER_TIMEOUT can't be set: messages sent to a connection that dies are lost");
+            }
+        }
         $c = new Conn($sock, $this->nextId++, (string)$peer, $ip);
+        $c->tcpKey = self::procAddr((string)stream_socket_get_name($sock, false)) . ' ' . self::procAddr((string)stream_socket_get_name($sock, true));
         $this->conns[$c->id] = $c;
         $this->perIp[$ip] = ($this->perIp[$ip] ?? 0) + 1;
         $this->log("#{$c->id} connected from {$c->peer}");
@@ -201,7 +218,8 @@ final class Server
     {
         $chunk = @fread($c->sock, 65536);
         if ($chunk === '' || $chunk === false) {
-            if (feof($c->sock)) { $this->drop($c, 'closed by peer'); }
+            // false: an error, such as TCP giving up on what the device never acknowledged.
+            if (feof($c->sock)) { $this->drop($c, $chunk === false ? 'connection lost' : 'closed by peer'); }
             return;
         }
         $c->in .= $chunk;
@@ -228,6 +246,7 @@ final class Server
         $n = @fwrite($c->sock, $c->out);
         if ($n === false) { $this->drop($c, 'write failed'); return; }
         $c->out = substr($c->out, $n);
+        $c->written += $n;
         if ($c->out === '' && $c->closing) $this->drop($c, 'done');
     }
 
@@ -236,17 +255,97 @@ final class Server
         if (!isset($this->conns[$c->id])) return;
         unset($this->conns[$c->id]);
         if (--$this->perIp[$c->ip] <= 0) unset($this->perIp[$c->ip]);
+        $unacked = $c->unsure ? (self::txQueues()[$c->tcpKey] ?? null) : null;
         @fclose($c->sock);
         $this->log("#{$c->id} {$c->sn} dropped: $why");
         if ($c->kind === 'bos' && isset($this->online[$c->nsn][$c->id])) {
             unset($this->online[$c->nsn][$c->id]);
             if (!$this->online[$c->nsn]) unset($this->online[$c->nsn]);
             if ($c->ready) $this->tellWatchers($c);
-            if (!isset($this->online[$c->nsn])) {
-                if ($why === 'signed off') unset($this->gone[$c->nsn]);
-                else $this->gone[$c->nsn] = microtime(true);
+            // Signing off, a client has had what came before; only what it can be seen not to have is kept.
+            if ($why !== 'signed off' || $unacked !== null) $this->keepUnsure($c, $unacked);
+        }
+    }
+
+    /**
+     * A session ended: the messages it may not have received are kept and delivered at the
+     * next sign-on. With the connection still known to the kernel, those whose bytes the
+     * device's TCP hasn't acknowledged ($unacked). Without (TCP gave it up, or it was reset),
+     * all still unconfirmed: tick() clears them once a second as they are acknowledged, or,
+     * without /proc/net/tcp, once delivery_timeout has passed (had one been unacknowledged
+     * that long, the connection would have ended). A message a session of the same name
+     * that was ready when it was sent still holds is left: that one has it. Should the name
+     * have sessions that came later, they get it now.
+     */
+    private function keepUnsure(Conn $c, ?int $unacked): void
+    {
+        $kept = 0;
+        foreach ($c->unsure as $u) {
+            if ($unacked !== null && $u['end'] <= $c->written - $unacked) continue;
+            $held = false;
+            foreach ($this->sessions($c->nsn) as $o) if ($o->opened < $u['sent']) { $held = true; break; }
+            if ($held) continue;
+            $now = $this->sessions($c->nsn);
+            foreach ($now as $o) $this->deliver($o, $this->stored($u['rec']), $u['rec']);
+            if ($now || $this->data->queueOffline($c->nsn, $u['rec'])) $kept++;
+            else $this->log("#{$c->id} '{$c->sn}' a message from '{$u['rec']['from']}' may be lost: offline queue full");
+        }
+        if ($kept) $this->log("#{$c->id} '{$c->sn}' $kept message(s) it may not have received, delivered again");
+    }
+
+    /**
+     * Bytes written to each TCP connection that its peer hasn't acknowledged (tx_queue), by
+     * local and remote address as /proc/net/tcp writes them. Empty where there is no /proc.
+     */
+    private static function txQueues(): array
+    {
+        $out = [];
+        foreach (['/proc/net/tcp', '/proc/net/tcp6'] as $f) {
+            foreach (@file($f) ?: [] as $line) {
+                $p = preg_split('/\s+/', trim($line));
+                if (count($p) > 4 && $p[0] !== 'sl') $out["$p[1] $p[2]"] = hexdec(explode(':', $p[4])[0]);
             }
         }
+        return $out;
+    }
+
+    /** Forgets the messages each session is now known to have received. */
+    private function clearAcknowledged(float $now): void
+    {
+        $this->lastAckCheck = $now;
+        $since = $now - $this->limits['delivery_timeout'] - 5;
+        $tx = null;
+        foreach ($this->conns as $c) {
+            if (!$c->unsure) continue;
+            $tx ??= self::txQueues();
+            $u = &$c->unsure;
+            if (isset($tx[$c->tcpKey])) {
+                $acked = $c->written - $tx[$c->tcpKey];
+                while ($u && $u[0]['end'] <= $acked) array_shift($u);
+            } else {
+                while ($u && $u[0]['end'] <= $c->written && $u[0]['sent'] < $since) array_shift($u);
+            }
+            unset($u);
+        }
+    }
+
+    /** "1.2.3.4:5190" or "[::1]:5190" as /proc/net/tcp writes it: the address's 32-bit words in host order. */
+    private static function procAddr(string $a): string
+    {
+        $at = strrpos($a, ':');
+        $bin = @inet_pton(trim(substr($a, 0, $at), '[]'));
+        if ($bin === false) return '';
+        $hex = '';
+        foreach (str_split($bin, 4) as $w) $hex .= bin2hex(pack('V', unpack('N', $w)[1]));
+        return strtoupper($hex) . sprintf(':%04X', (int)substr($a, $at + 1));
+    }
+
+    /** Hands an instant message to a session, remembering it until it is known to have arrived. */
+    private function deliver(Conn $o, string $body, array $rec): void
+    {
+        $this->snac($o, 0x04, 0x07, $body);
+        if (!$this->redeliver) return;
+        $o->unsure[] = ['rec' => $rec, 'sent' => microtime(true), 'end' => $o->queued];
     }
 
     private function tick(): void
@@ -257,9 +356,7 @@ final class Server
             elseif ($c->kind !== 'bos' && $now - $c->opened > $this->limits['signon_timeout']) $this->drop($c, 'no sign-on in time');
             elseif ($c->kind === 'bos' && $now - $c->lastSent > $this->limits['keepalive']) $this->send($c, Wire::CH_KEEPALIVE, '');
         }
-        foreach ($this->gone as $n => $t) {
-            if ($now - $t > self::RECONNECT_GRACE) unset($this->gone[$n]);
-        }
+        if ($now - $this->lastAckCheck >= 1) $this->clearAcknowledged($now);
         foreach ($this->cookies as $k => $v) {
             if ($v['until'] < $now) unset($this->cookies[$k]);
         }
@@ -290,7 +387,9 @@ final class Server
 
     private function send(Conn $c, int $channel, string $data): void
     {
-        $c->out .= Wire::flap($channel, $c->seq++, $data);
+        $f = Wire::flap($channel, $c->seq++, $data);
+        $c->out .= $f;
+        $c->queued += strlen($f);
         $c->lastSent = microtime(true);
         $c->seq &= 0xffff;
         if (strlen($c->out) > self::MAX_UNREAD) $this->drop($c, 'not reading');
@@ -577,10 +676,7 @@ final class Server
         $this->tellWatchers($c);
         $offline = $this->data->takeOffline($c->nsn);
         if ($offline) $this->vlog($c, sprintf("%d offline message(s) delivered", count($offline)));
-        foreach ($offline as $m) {
-            $this->snac($c, 0x04, 0x07, hex2bin($m['cookie']) . pack('n', $m['channel'])
-                . $this->userInfoOffline($m['from']) . hex2bin($m['tlvs']) . (new Tlvs())->u32(0x0016, $m['time'])->encode());
-        }
+        foreach ($offline as $m) $this->deliver($c, $this->stored($m), $m);
         $this->log("#{$c->id} '{$c->sn}' is online (" . count($this->online) . " online)");
     }
 
@@ -628,6 +724,13 @@ final class Server
         return Wire::str8($u->sn) . pack('n', 0) . $t->encodeCounted();
     }
 
+    /** A kept message (04,07), with the time it was sent. */
+    private function stored(array $m): string
+    {
+        return hex2bin($m['cookie']) . pack('n', $m['channel']) . $this->userInfoOffline($m['from'])
+            . hex2bin($m['tlvs']) . (new Tlvs())->u32(0x0016, $m['time'])->encode();
+    }
+
     private function userInfoOffline(string $sn): string
     {
         return Wire::str8($sn) . pack('n', 0) . (new Tlvs())->u16(0x0001, 0x0010)->encodeCounted();
@@ -671,34 +774,34 @@ final class Server
             $this->snac($c, 0x04, 0x01, pack('n', 0x000E), $reqid);   // incorrect SNAC format
             return;
         }
-        $all = $this->sessions(Wire::normalize($to));
+        $nto = Wire::normalize($to);
+        $rec = ['from' => $c->sn, 'cookie' => bin2hex($cookie), 'channel' => $channel,
+            'tlvs' => bin2hex($fwd->encode()), 'time' => time()];
+        $all = $this->sessions($nto);
         if ($all) {
             $this->vlog($c, "$about delivered" . (count($all) > 1 ? " to " . count($all) . " sessions" : ''));
             $msg = $cookie . pack('n', $channel) . $this->userInfo($c) . $fwd->encode();
-            foreach ($all as $o) $this->snac($o, 0x04, 0x07, $msg);
+            foreach ($all as $o) {
+                if ($channel === 1) $this->deliver($o, $msg, $rec);
+                else $this->snac($o, 0x04, 0x07, $msg);
+            }
             if ($t->has(0x0003)) $this->snac($c, 0x04, 0x0C, $cookie . pack('n', $channel) . Wire::str8($to), $reqid);
             return;
         }
-        // Kept for a screen name that is an account, up to UserData's limits: when the sender
-        // asks, or when the recipient's connection went within RECONNECT_GRACE and it is
-        // likely signing back in.
-        $nto = Wire::normalize($to);
-        $since = isset($this->gone[$nto]) ? (int)(microtime(true) - $this->gone[$nto]) : null;
-        if ($channel === 1 && ($t->has(0x0006) || $since !== null) && $this->accounts->exists($to)) {
-            $kept = $this->data->queueOffline($nto, [
-                'from' => $c->sn, 'cookie' => bin2hex($cookie), 'channel' => $channel,
-                'tlvs' => bin2hex($fwd->encode()), 'time' => time(),
-            ]);
+        // Kept for any screen name that is an account, whether or not the sender asked, up to
+        // UserData's limits, and delivered when it signs on.
+        if ($channel === 1 && $this->accounts->exists($to)) {
+            $kept = $this->data->queueOffline($nto, $rec);
             if (!$kept) {
                 $this->vlog($c, "$about refused: recipient's offline queue is full");
                 $this->snac($c, 0x04, 0x01, pack('n', 0x0017), $reqid);   // server queue full
                 return;
             }
-            $this->vlog($c, "$about stored offline" . ($t->has(0x0006) ? '' : " (recipient's connection went $since s ago)"));
+            $this->vlog($c, "$about stored offline");
             if ($t->has(0x0003)) $this->snac($c, 0x04, 0x0C, $cookie . pack('n', $channel) . Wire::str8($to), $reqid);
             return;
         }
-        $this->vlog($c, "$about refused: recipient offline" . ($t->has(0x0006) ? " and not an account" : ", not stored (the sender didn't ask)"));
+        $this->vlog($c, "$about refused: recipient offline and " . ($channel === 1 ? "not an account" : "not a text message"));
         $this->snac($c, 0x04, 0x01, pack('n', 0x0004), $reqid);        // recipient not logged in
     }
 
@@ -820,6 +923,9 @@ final class Server
         foreach (self::RATED as $fam => $subs) foreach ($subs as $sub) { $members .= pack('nn', $fam, $sub); $n++; }
         return pack('n', 1) . $class . pack('nn', 1, $n) . $members;
     }
+
+    /** Linux's TCP_USER_TIMEOUT, should PHP not name it. */
+    private const TCP_USER_TIMEOUT = 18;
 
     public const LOG_NORMAL = 0;    // connections, sign-ins, refusals, limits
     public const LOG_VERBOSE = 1;   // and what each session does: buddies, messages, away, idle
